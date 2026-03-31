@@ -425,12 +425,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - ChromaDB for vector storage
 - Streamlit for the dashboard framework
 
-## 📧 Contact
-
-Your Name - your.email@example.com
-
-Project Link: [https://github.com/yourusername/financial-news-analyzer](https://github.com/yourusername/financial-news-analyzer)
-
 ## 🗺️ Roadmap
 
 - [ ] Add support for cryptocurrency analysis
