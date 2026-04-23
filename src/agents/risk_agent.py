@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from datetime import datetime
 from loguru import logger
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 from .base import BaseAgent
 
@@ -122,7 +122,8 @@ class RiskAgent(BaseAgent):
             )
             
             # Get LLM risk analysis
-            llm_analysis = self.llm.predict(prompt)
+            response = self.llm.invoke(prompt)
+            llm_analysis = response.content if hasattr(response, 'content') else str(response)
             
             # Extract structured risks
             risks = self._parse_risks(llm_analysis)

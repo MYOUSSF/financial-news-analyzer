@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from datetime import datetime
 from loguru import logger
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from transformers import pipeline
 import numpy as np
 

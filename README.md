@@ -49,7 +49,7 @@ Alpha Vantage API key (free)
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/financial-news-analyzer.git
+git clone https://github.com/MYSSF/financial-news-analyzer.git
 cd financial-news-analyzer
 ```
 

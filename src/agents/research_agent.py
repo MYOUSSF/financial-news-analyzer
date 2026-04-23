@@ -5,8 +5,7 @@ from typing import Any, Dict, List
 from datetime import datetime, timedelta
 from loguru import logger
 
-from langchain.agents import AgentType, initialize_agent
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 from .base import BaseAgent
 
@@ -36,15 +35,8 @@ class ResearchAgent(BaseAgent):
             verbose=verbose
         )
         
-        # Initialize the agent executor
-        self.agent_executor = initialize_agent(
-            tools=self.tools,
-            llm=self.llm,
-            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            verbose=self.verbose,
-            handle_parsing_errors=True,
-            max_iterations=5
-        )
+        # Bind tools to the LLM
+        self.llm_with_tools = self.llm.bind_tools(self.tools)
         
         # Research prompt template
         self.research_prompt = PromptTemplate(
@@ -93,26 +85,26 @@ class ResearchAgent(BaseAgent):
             
             logger.info(f"Starting research for {symbol} ({days_back} days)")
             
-            # Format the research query
+            # Execute using LLM with tools
             query = self.research_prompt.format(
                 symbol=symbol,
                 days_back=days_back,
                 focus_areas=focus_areas
             )
             
-            # Execute the agent
-            result = self.agent_executor.invoke({"input": query})
+            # Call the LLM with tools
+            result = self.llm_with_tools.invoke(query)
             
             # Parse and structure the output
             output = {
                 "symbol": symbol,
                 "research_date": datetime.now().isoformat(),
                 "period_days": days_back,
-                "findings": result.get("output", ""),
+                "findings": result.content if hasattr(result, 'content') else str(result),
                 "sources_used": self._extract_sources(result),
                 "metadata": {
                     "agent": self.name,
-                    "execution_time": result.get("execution_time", 0)
+                    "execution_time": getattr(result, 'usage_metadata', {}).get('total_time', 0) if hasattr(result, 'usage_metadata') else 0
                 }
             }
             
@@ -151,17 +143,23 @@ class ResearchAgent(BaseAgent):
         logger.info(f"Completed batch research for {len(symbols)} symbols")
         return results
     
-    def _extract_sources(self, result: Dict[str, Any]) -> List[str]:
+    def _extract_sources(self, result: Any) -> List[str]:
         """Extract data sources used during research."""
         sources = []
         
-        # Check intermediate steps for tool usage
-        if "intermediate_steps" in result:
-            for step in result["intermediate_steps"]:
-                if len(step) > 0:
-                    tool_name = getattr(step[0], "tool", "unknown")
-                    if tool_name not in sources:
-                        sources.append(tool_name)
+        # Check for tool calls in the result
+        if hasattr(result, 'tool_calls') and result.tool_calls:
+            for tool_call in result.tool_calls:
+                tool_name = tool_call.get("name", "unknown")
+                if tool_name not in sources:
+                    sources.append(tool_name)
+        
+        # Fallback: check if tools were mentioned in the content
+        elif hasattr(result, 'content'):
+            content = result.content.lower()
+            for tool in self.tools:
+                if tool.name.lower() in content:
+                    sources.append(tool.name)
         
         return sources
     

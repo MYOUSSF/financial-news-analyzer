@@ -2,11 +2,11 @@
 News Tool - Fetches financial news from NewsAPI and other sources.
 """
 import os
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime, timedelta
 from loguru import logger
 
-from langchain.tools import BaseTool
+from langchain_core.tools import BaseTool
 from pydantic import Field
 
 try:
@@ -27,16 +27,17 @@ class NewsTool(BaseTool):
     
     api_key: Optional[str] = Field(default=None)
     max_results: int = Field(default=10)
+    client: Optional[Any] = Field(default=None, exclude=True)
     
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.api_key = self.api_key or os.getenv("NEWSAPI_KEY")
+    def model_post_init(self, __context):
+        """Initialize the NewsAPI client after model initialization."""
+        api_key = self.api_key or os.getenv("NEWSAPI_KEY")
         
-        if not self.api_key:
+        if not api_key:
             logger.warning("NewsAPI key not found. Tool will return mock data.")
             self.client = None
         elif NewsApiClient:
-            self.client = NewsApiClient(api_key=self.api_key)
+            self.client = NewsApiClient(api_key=api_key)
         else:
             logger.warning("newsapi-python not installed. Install with: pip install newsapi-python")
             self.client = None

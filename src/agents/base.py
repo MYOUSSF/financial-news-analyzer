@@ -4,8 +4,7 @@ Base Agent class for all specialized agents in the system.
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 from loguru import logger
-from langchain.agents import AgentExecutor
-from langchain.memory import ConversationBufferMemory
+# from langchain_core.memory import ConversationBufferMemory  # Not available in this version
 
 
 class BaseAgent(ABC):
@@ -39,11 +38,11 @@ class BaseAgent(ABC):
         self.tools = tools or []
         self.verbose = verbose
         
-        # Initialize memory for conversation history
-        self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
+        # Initialize memory for conversation history (commented out due to import issues)
+        # self.memory = ConversationBufferMemory(
+        #     memory_key="chat_history",
+        #     return_messages=True
+        # )
         
         logger.info(f"Initialized {self.name}")
     
