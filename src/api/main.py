@@ -1,52 +1,122 @@
 """
-FastAPI Application - REST API for Financial News Analyzer
+FastAPI Application — REST API for Financial News Analyzer
+
+All endpoints are wired to the real multi-agent pipeline (lazy-initialized
+on first request so the server starts fast even without API keys configured).
+
+Start with:
+    uvicorn src.api.main:app --reload --port 8000
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from __future__ import annotations
+
 import os
 import sys
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from loguru import logger
+from dotenv import load_dotenv
 
-# Initialize FastAPI app
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Make src/ importable when running from the api/ sub-directory
+# ---------------------------------------------------------------------------
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+
+# ---------------------------------------------------------------------------
+# Lazy global chain — initialized once on first real request
+# ---------------------------------------------------------------------------
+_chain = None
+
+
+def get_chain():
+    """Return the singleton FinancialAnalysisChain, initializing it on first call."""
+    global _chain
+    if _chain is None:
+        from src.chains.analysis_chain import FinancialAnalysisChain
+        _chain = FinancialAnalysisChain(verbose=False)
+        logger.info("FinancialAnalysisChain initialized.")
+    return _chain
+
+
+# ---------------------------------------------------------------------------
+# Lifespan (replaces deprecated @app.on_event)
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting Financial News Analyzer API")
+    # Warm up chain in background (optional — comment out to keep startup fast)
+    # get_chain()
+    yield
+    logger.info("Shutting down Financial News Analyzer API")
+
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
 app = FastAPI(
     title="Financial News Analyzer API",
     description="AI-powered financial research and analysis API",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ============================================================================
-# Request/Response Models
-# ============================================================================
+
+# ===========================================================================
+# Pydantic models
+# ===========================================================================
 
 class AnalysisRequest(BaseModel):
-    """Request model for stock analysis."""
     symbol: str = Field(..., description="Stock symbol (e.g., AAPL)")
     days_back: int = Field(7, ge=1, le=30, description="Days to analyze")
-    include_sentiment: bool = Field(True, description="Include sentiment analysis")
-    include_risk: bool = Field(True, description="Include risk assessment")
-    include_trends: bool = Field(False, description="Include trend analysis")
+    include_sentiment: bool = Field(True)
+    include_risk: bool = Field(True)
+    include_trends: bool = Field(False)
+
+
+class SentimentRequest(BaseModel):
+    symbol: str
+    text: Optional[str] = None
+    articles: Optional[List[str]] = None
+
+
+class RiskRequest(BaseModel):
+    symbol: str
+    days_back: int = Field(7, ge=1, le=30)
+    news_data: Optional[str] = None
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., description="Semantic search query")
+    limit: int = Field(10, ge=1, le=50)
+    threshold: float = Field(0.4, ge=0.0, le=1.0)
+    symbol: Optional[str] = None
+
+
+class ReportRequest(BaseModel):
+    symbol: str
+    report_type: str = Field("comprehensive", description="comprehensive | summary | risk | sentiment")
+    format: str = Field("markdown", description="markdown | pdf | html")
 
 
 class SentimentResponse(BaseModel):
-    """Response model for sentiment analysis."""
     symbol: str
     overall_sentiment: str
     sentiment_score: float
@@ -56,7 +126,6 @@ class SentimentResponse(BaseModel):
 
 
 class RiskResponse(BaseModel):
-    """Response model for risk assessment."""
     symbol: str
     overall_risk_score: float
     risk_level: str
@@ -67,19 +136,22 @@ class RiskResponse(BaseModel):
 
 
 class AnalysisResponse(BaseModel):
-    """Response model for complete analysis."""
     symbol: str
     analysis_date: str
     period_days: int
+    executive_summary: str
+    recommendation: str
+    confidence: float
+    confidence_label: str
     sentiment: Optional[SentimentResponse] = None
     risk: Optional[RiskResponse] = None
-    news_summary: str
-    overall_recommendation: str
-    confidence: float
+    key_positives: List[str] = []
+    key_negatives: List[str] = []
+    action_items: List[str] = []
+    scores: Dict[str, float] = {}
 
 
 class NewsArticle(BaseModel):
-    """Model for news article."""
     title: str
     source: str
     published_at: str
@@ -89,389 +161,354 @@ class NewsArticle(BaseModel):
     sentiment_score: Optional[float] = None
 
 
-class SearchRequest(BaseModel):
-    """Request model for semantic search."""
-    query: str = Field(..., description="Search query")
-    limit: int = Field(10, ge=1, le=50, description="Number of results")
-    threshold: float = Field(0.7, ge=0, le=1, description="Similarity threshold")
+# ===========================================================================
+# Utility
+# ===========================================================================
+
+def _chain_available() -> bool:
+    """Return True if at least one LLM provider is configured."""
+    return any([
+        os.getenv("OPENAI_API_KEY"),
+        os.getenv("ANTHROPIC_API_KEY"),
+        os.getenv("OLLAMA_BASE_URL"),
+    ])
 
 
-# ============================================================================
-# API Endpoints
-# ============================================================================
+# ===========================================================================
+# Routes
+# ===========================================================================
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
     return {
         "message": "Financial News Analyzer API",
         "version": "1.0.0",
         "status": "operational",
-        "docs": "/docs"
+        "docs": "/docs",
+        "chain_ready": _chain_available(),
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    vector_store_ok = False
+    try:
+        from src.utils.vector_store import VectorStore
+        vs = VectorStore()
+        vector_store_ok = vs.count() >= 0
+    except Exception:
+        pass
+
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "services": {
             "api": "operational",
-            "llm": "operational",
-            "vector_db": "operational"
-        }
+            "llm_configured": _chain_available(),
+            "vector_db": "operational" if vector_store_ok else "unavailable (run init_db.py)",
+        },
     }
 
 
 @app.post("/api/analyze", response_model=AnalysisResponse)
 async def analyze_stock(request: AnalysisRequest):
-    """
-    Perform comprehensive analysis on a stock.
-    
-    Args:
-        request: Analysis request parameters
-    
-    Returns:
-        Complete analysis results
-    """
-    try:
-        logger.info(f"Analyzing {request.symbol}")
-        
-        # Mock response (replace with actual analysis)
-        response = AnalysisResponse(
-            symbol=request.symbol,
-            analysis_date=datetime.now().isoformat(),
-            period_days=request.days_back,
-            news_summary=f"Analysis of {request.symbol} over past {request.days_back} days shows positive trends.",
-            overall_recommendation="HOLD",
-            confidence=0.85
+    """Run the full multi-agent analysis pipeline for a stock symbol."""
+    if not _chain_available():
+        raise HTTPException(
+            status_code=503,
+            detail="No LLM provider configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_BASE_URL.",
         )
-        
-        if request.include_sentiment:
-            response.sentiment = SentimentResponse(
+
+    try:
+        chain = get_chain()
+        result = chain.analyze_stock(
+            symbol=request.symbol,
+            days_back=request.days_back,
+            include_sentiment=request.include_sentiment,
+            include_risk=request.include_risk,
+        )
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        # Build sentiment sub-response
+        sentiment_resp: Optional[SentimentResponse] = None
+        if request.include_sentiment and result.get("_sentiment"):
+            s = result["_sentiment"]
+            sentiment_resp = SentimentResponse(
                 symbol=request.symbol,
-                overall_sentiment="Positive",
-                sentiment_score=0.75,
-                confidence=0.85,
-                analysis_date=datetime.now().isoformat(),
-                key_insights={
-                    "positive_factors": ["Strong earnings", "Positive analyst ratings"],
-                    "negative_factors": ["Regulatory concerns"],
-                    "market_implications": ["Continued growth expected"]
-                }
+                overall_sentiment=s.get("overall_sentiment", "NEUTRAL"),
+                sentiment_score=float(s.get("sentiment_score", 0.5)),
+                confidence=float(s.get("confidence", 0.5)),
+                analysis_date=s.get("analysis_date", datetime.now().isoformat()),
+                key_insights=s.get("key_insights", {}),
             )
-        
-        if request.include_risk:
-            response.risk = RiskResponse(
+
+        # Build risk sub-response
+        risk_resp: Optional[RiskResponse] = None
+        if request.include_risk and result.get("_risk"):
+            r = result["_risk"]
+            risk_resp = RiskResponse(
                 symbol=request.symbol,
-                overall_risk_score=0.55,
-                risk_level="MEDIUM",
-                identified_risks=[
-                    {
-                        "category": "volatility",
-                        "severity": "HIGH",
-                        "likelihood": 0.75,
-                        "description": "Increased price volatility"
-                    }
-                ],
-                alerts=[],
-                recommendations=[
-                    "Monitor volatility closely",
-                    "Consider hedging strategies"
-                ],
-                analysis_date=datetime.now().isoformat()
+                overall_risk_score=float(r.get("overall_risk_score", 0.5)),
+                risk_level=r.get("risk_level", "MEDIUM"),
+                identified_risks=r.get("identified_risks", []),
+                alerts=r.get("alerts", []),
+                recommendations=r.get("recommendations", []),
+                analysis_date=r.get("analysis_date", datetime.now().isoformat()),
             )
-        
-        logger.info(f"Analysis complete for {request.symbol}")
-        return response
-        
+
+        return AnalysisResponse(
+            symbol=result["symbol"],
+            analysis_date=result["analysis_date"],
+            period_days=result["period_days"],
+            executive_summary=result.get("executive_summary", ""),
+            recommendation=result.get("recommendation", "HOLD"),
+            confidence=result.get("confidence", 0.5),
+            confidence_label=result.get("confidence_label", "MEDIUM"),
+            sentiment=sentiment_resp,
+            risk=risk_resp,
+            key_positives=result.get("key_positives", []),
+            key_negatives=result.get("key_negatives", []),
+            action_items=result.get("action_items", []),
+            scores=result.get("scores", {}),
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Analysis error: {str(e)}")
+        logger.error(f"Analysis error for {request.symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/stocks/{symbol}/news", response_model=List[NewsArticle])
 async def get_stock_news(
     symbol: str,
-    days: int = 7,
-    limit: int = 20
+    days: int = Query(default=7, ge=1, le=30),
+    limit: int = Query(default=20, ge=1, le=100),
 ):
-    """
-    Get recent news for a stock.
-    
-    Args:
-        symbol: Stock symbol
-        days: Days to look back
-        limit: Maximum number of articles
-    
-    Returns:
-        List of news articles
-    """
+    """Fetch and return recent news articles for a stock symbol."""
     try:
-        logger.info(f"Fetching news for {symbol}")
-        
-        # Mock news (replace with actual news fetching)
-        articles = [
+        from src.tools.news_tool import NewsTool
+        tool = NewsTool(api_key=os.getenv("NEWSAPI_KEY"))
+        raw = tool._run(symbol.upper())
+
+        # Parse the formatted string back into articles
+        # (In production you'd return structured data directly from the tool)
+        articles = []
+        current: Dict[str, str] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line[0].isdigit() and "." in line[:3]:
+                if current:
+                    articles.append(current)
+                current = {"title": line.split(".", 1)[1].strip(), "source": "", "published_at": "", "summary": "", "url": ""}
+            elif line.startswith("Source:"):
+                current["source"] = line.replace("Source:", "").strip()
+            elif line.startswith("Published:"):
+                current["published_at"] = line.replace("Published:", "").strip()
+            elif line.startswith("Summary:"):
+                current["summary"] = line.replace("Summary:", "").strip()
+            elif line.startswith("URL:"):
+                current["url"] = line.replace("URL:", "").strip()
+        if current and current.get("title"):
+            articles.append(current)
+
+        return [
             NewsArticle(
-                title=f"{symbol} Reports Strong Earnings",
-                source="Bloomberg",
-                published_at=datetime.now().isoformat(),
-                summary="Company beats analyst expectations with strong Q4 results.",
-                url="https://example.com/article1",
-                sentiment="Positive",
-                sentiment_score=0.85
-            ),
-            NewsArticle(
-                title=f"Analysts Upgrade {symbol}",
-                source="Reuters",
-                published_at=datetime.now().isoformat(),
-                summary="Major banks raise price targets following earnings.",
-                url="https://example.com/article2",
-                sentiment="Positive",
-                sentiment_score=0.78
+                title=a.get("title", ""),
+                source=a.get("source", ""),
+                published_at=a.get("published_at", datetime.now().isoformat()),
+                summary=a.get("summary", ""),
+                url=a.get("url", ""),
             )
+            for a in articles[:limit]
         ]
-        
-        return articles[:limit]
-        
+
     except Exception as e:
-        logger.error(f"News fetch error: {str(e)}")
+        logger.error(f"News fetch error for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/sentiment/analyze")
-async def analyze_sentiment(
-    symbol: str,
-    text: Optional[str] = None,
-    articles: Optional[List[str]] = None
-):
-    """
-    Analyze sentiment of text or articles.
-    
-    Args:
-        symbol: Stock symbol (for context)
-        text: Single text to analyze
-        articles: List of article texts
-    
-    Returns:
-        Sentiment analysis results
-    """
+@app.post("/api/sentiment/analyze", response_model=SentimentResponse)
+async def analyze_sentiment(request: SentimentRequest):
+    """Run standalone sentiment analysis on provided text or articles."""
+    if not request.text and not request.articles:
+        raise HTTPException(status_code=400, detail="Provide either 'text' or 'articles'.")
+
+    if not _chain_available():
+        raise HTTPException(status_code=503, detail="No LLM provider configured.")
+
     try:
-        if not text and not articles:
-            raise HTTPException(
-                status_code=400,
-                detail="Either text or articles must be provided"
-            )
-        
-        logger.info(f"Analyzing sentiment for {symbol}")
-        
-        # Mock sentiment analysis
-        return {
-            "symbol": symbol,
-            "overall_sentiment": "Positive",
-            "sentiment_score": 0.75,
-            "confidence": 0.85,
-            "analysis_date": datetime.now().isoformat()
-        }
-        
+        chain = get_chain()
+        input_data: Dict[str, Any] = {"symbol": request.symbol}
+        if request.text:
+            input_data["text"] = request.text
+        else:
+            input_data["articles"] = request.articles
+
+        result = chain.sentiment_agent.execute(input_data)
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return SentimentResponse(
+            symbol=result["symbol"],
+            overall_sentiment=result.get("overall_sentiment", "NEUTRAL"),
+            sentiment_score=float(result.get("sentiment_score", 0.5)),
+            confidence=float(result.get("confidence", 0.5)),
+            analysis_date=result.get("analysis_date", datetime.now().isoformat()),
+            key_insights=result.get("key_insights", {}),
+        )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Sentiment analysis error: {str(e)}")
+        logger.error(f"Sentiment analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/risks/detect")
-async def detect_risks(symbol: str, days_back: int = 7):
-    """
-    Detect and analyze risks for a stock.
-    
-    Args:
-        symbol: Stock symbol
-        days_back: Days to analyze
-    
-    Returns:
-        Risk assessment results
-    """
+@app.post("/api/risks/detect", response_model=RiskResponse)
+async def detect_risks(request: RiskRequest):
+    """Run standalone risk detection for a stock symbol."""
+    if not _chain_available():
+        raise HTTPException(status_code=503, detail="No LLM provider configured.")
+
     try:
-        logger.info(f"Detecting risks for {symbol}")
-        
-        # Mock risk detection
+        chain = get_chain()
+        result = chain.risk_agent.execute({
+            "symbol": request.symbol,
+            "news_data": request.news_data or "",
+            "market_data": {},
+            "sentiment": {},
+        })
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
         return RiskResponse(
-            symbol=symbol,
-            overall_risk_score=0.55,
-            risk_level="MEDIUM",
-            identified_risks=[
-                {
-                    "category": "volatility",
-                    "severity": "HIGH",
-                    "likelihood": 0.75,
-                    "description": "Increased price volatility detected"
-                },
-                {
-                    "category": "regulatory",
-                    "severity": "MEDIUM",
-                    "likelihood": 0.60,
-                    "description": "Regulatory scrutiny in EU markets"
-                }
-            ],
-            alerts=[
-                {
-                    "type": "OVERALL_RISK",
-                    "severity": "MEDIUM",
-                    "message": "Overall risk level elevated",
-                    "timestamp": datetime.now().isoformat()
-                }
-            ],
-            recommendations=[
-                "Monitor volatility closely",
-                "Stay informed on regulatory developments",
-                "Consider hedging strategies"
-            ],
-            analysis_date=datetime.now().isoformat()
+            symbol=result["symbol"],
+            overall_risk_score=float(result.get("overall_risk_score", 0.5)),
+            risk_level=result.get("risk_level", "MEDIUM"),
+            identified_risks=result.get("identified_risks", []),
+            alerts=result.get("alerts", []),
+            recommendations=result.get("recommendations", []),
+            analysis_date=result.get("analysis_date", datetime.now().isoformat()),
         )
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Risk detection error: {str(e)}")
+        logger.error(f"Risk detection error for {request.symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/search/semantic")
 async def semantic_search(request: SearchRequest):
-    """
-    Perform semantic search over historical news.
-    
-    Args:
-        request: Search parameters
-    
-    Returns:
-        Search results
-    """
+    """Search historical news in the vector store using semantic similarity."""
     try:
-        logger.info(f"Semantic search: {request.query}")
-        
-        # Mock search results
+        from src.utils.vector_store import VectorStore
+        vs = VectorStore()
+
+        where = {"symbol": request.symbol.upper()} if request.symbol else None
+        results = vs.search(
+            query=request.query,
+            n_results=request.limit,
+            where=where,
+            threshold=request.threshold,
+        )
+
         return {
             "query": request.query,
-            "results": [
-                {
-                    "content": "Example news article matching the query",
-                    "score": 0.95,
-                    "metadata": {
-                        "source": "Bloomberg",
-                        "date": "2024-03-30"
-                    }
-                }
-            ],
-            "total": 1
+            "results": results,
+            "total": len(results),
         }
-        
+
     except Exception as e:
-        logger.error(f"Search error: {str(e)}")
+        logger.error(f"Semantic search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/reports/generate")
-async def generate_report(
-    symbol: str,
-    report_type: str = "comprehensive",
-    format: str = "pdf"
-):
-    """
-    Generate investment research report.
-    
-    Args:
-        symbol: Stock symbol
-        report_type: Type of report (comprehensive, summary, risk, sentiment)
-        format: Output format (pdf, docx, html, markdown)
-    
-    Returns:
-        Report generation status
-    """
+async def generate_report(request: ReportRequest):
+    """Generate a full investment research report via the analysis chain."""
+    if not _chain_available():
+        raise HTTPException(status_code=503, detail="No LLM provider configured.")
+
     try:
-        logger.info(f"Generating {report_type} report for {symbol}")
-        
+        chain = get_chain()
+        result = chain.analyze_stock(symbol=request.symbol)
+
+        md_report = chain.summary_agent.generate_report_markdown(result)
+
         return {
-            "symbol": symbol,
-            "report_type": report_type,
-            "format": format,
+            "symbol": request.symbol,
+            "report_type": request.report_type,
+            "format": request.format,
             "status": "generated",
-            "download_url": f"/api/reports/download/{symbol}_{report_type}",
-            "generated_at": datetime.now().isoformat()
+            "content": md_report,
+            "generated_at": datetime.now().isoformat(),
         }
-        
+
     except Exception as e:
-        logger.error(f"Report generation error: {str(e)}")
+        logger.error(f"Report generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/symbols/trending")
-async def get_trending_symbols(limit: int = 10):
-    """
-    Get trending stock symbols based on news volume.
-    
-    Args:
-        limit: Number of symbols to return
-    
-    Returns:
-        List of trending symbols
-    """
+async def get_trending_symbols(limit: int = Query(default=10, ge=1, le=50)):
+    """Return trending symbols based on vector store news volume."""
     try:
-        # Mock trending symbols
-        return {
-            "symbols": [
-                {"symbol": "AAPL", "news_count": 47, "sentiment": 0.75},
-                {"symbol": "GOOGL", "news_count": 42, "sentiment": 0.68},
-                {"symbol": "MSFT", "news_count": 38, "sentiment": 0.72},
-                {"symbol": "TSLA", "news_count": 35, "sentiment": 0.55},
-                {"symbol": "AMZN", "news_count": 33, "sentiment": 0.70}
-            ][:limit],
-            "updated_at": datetime.now().isoformat()
-        }
-        
+        from src.utils.vector_store import VectorStore
+        vs = VectorStore()
+
+        # Count documents per symbol via broad search
+        popular = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN", "NVDA", "META", "SPY", "BTC", "NFLX"]
+        trending = []
+        for sym in popular[:limit]:
+            results = vs.search_by_symbol(sym, n_results=5)
+            trending.append({
+                "symbol": sym,
+                "news_count": len(results),
+                "avg_sentiment": round(
+                    sum(r["metadata"].get("sentiment_score", 0.5) for r in results) / max(len(results), 1),
+                    2,
+                ),
+            })
+
+        trending.sort(key=lambda x: x["news_count"], reverse=True)
+
+        return {"symbols": trending, "updated_at": datetime.now().isoformat()}
+
     except Exception as e:
-        logger.error(f"Trending symbols error: {str(e)}")
+        logger.error(f"Trending symbols error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/stats")
 async def get_statistics():
-    """Get system statistics."""
+    """Return system statistics."""
+    doc_count = 0
+    try:
+        from src.utils.vector_store import VectorStore
+        doc_count = VectorStore().count()
+    except Exception:
+        pass
+
     return {
-        "total_analyses": 1247,
-        "total_articles_processed": 45823,
-        "active_monitors": 42,
-        "average_response_time": "1.8s",
-        "uptime": "99.9%"
+        "vector_store_documents": doc_count,
+        "chain_initialized": _chain is not None,
+        "llm_configured": _chain_available(),
+        "timestamp": datetime.now().isoformat(),
     }
 
 
-# ============================================================================
-# Startup/Shutdown Events
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup."""
-    logger.info("Starting Financial News Analyzer API")
-    # Initialize agents, load models, etc.
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown."""
-    logger.info("Shutting down Financial News Analyzer API")
-    # Cleanup resources
-
+# ===========================================================================
+# Dev entry point
+# ===========================================================================
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")

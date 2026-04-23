@@ -1,0 +1,168 @@
+# =============================================================================
+# Financial News Analyzer — Agent Configuration
+# =============================================================================
+# Loaded by FinancialAnalysisChain. Override any value here without touching code.
+
+# -----------------------------------------------------------------------------
+# LLM Settings
+# -----------------------------------------------------------------------------
+llm:
+  provider: auto            # auto | openai | anthropic | ollama
+  temperature: 0.3          # Lower = more deterministic (recommended for finance)
+  max_tokens: 2048
+
+
+# -----------------------------------------------------------------------------
+# Research Agent
+# -----------------------------------------------------------------------------
+research_agent:
+  max_iterations: 5
+  days_back_default: 7      # Default look-back window (days)
+  days_back_max: 30
+  focus_areas_default: "earnings, product launches, regulatory issues, market sentiment"
+  sources:
+    - newsapi
+    - yfinance
+    - alpha_vantage
+  verbose: false
+
+
+# -----------------------------------------------------------------------------
+# Sentiment Agent
+# -----------------------------------------------------------------------------
+sentiment_agent:
+  ml_model: distilbert-base-uncased-finetuned-sst-2-english
+  ml_device: -1             # -1 = CPU, 0 = first GPU
+  ml_max_length: 512        # Token limit for transformer model
+  llm_article_limit: 5      # Max articles sent to LLM at once
+  llm_char_limit: 3000      # Max chars sent to LLM
+  positive_threshold: 0.15  # Normalized score above this → POSITIVE label
+  negative_threshold: -0.15 # Normalized score below this → NEGATIVE label
+  verbose: false
+
+
+# -----------------------------------------------------------------------------
+# Risk Agent
+# -----------------------------------------------------------------------------
+risk_agent:
+  alert_threshold: 0.70     # Risk score above this triggers an alert
+  risk_categories:
+    volatility:
+      indicators: [price_swings, volume_spikes, beta]
+      threshold: 0.70
+    regulatory:
+      indicators: [investigations, lawsuits, compliance_issues]
+      threshold: 0.60
+    financial:
+      indicators: [debt_levels, cash_flow, profitability]
+      threshold: 0.65
+    market:
+      indicators: [sector_decline, competitor_moves, market_share]
+      threshold: 0.60
+    operational:
+      indicators: [supply_chain, management_changes, strikes]
+      threshold: 0.65
+  severity_weights:
+    LOW: 0.25
+    MEDIUM: 0.50
+    HIGH: 0.75
+    CRITICAL: 1.00
+  sentiment_adjustment:
+    negative_multiplier: 1.20   # Negative sentiment increases risk score
+    positive_multiplier: 0.90   # Positive sentiment decreases risk score
+    negative_threshold: 0.40    # Sentiment score below this = negative
+    positive_threshold: 0.60    # Sentiment score above this = positive
+  verbose: false
+
+
+# -----------------------------------------------------------------------------
+# Summary Agent
+# -----------------------------------------------------------------------------
+summary_agent:
+  recommendation_matrix:
+    strong_buy:
+      sentiment_min: 0.75
+      risk_max: 0.35
+    buy:
+      sentiment_min: 0.60
+      risk_max: 0.50
+    hold:
+      sentiment_min: 0.40
+      risk_max: 0.65
+    sell:
+      sentiment_min: 0.25
+      risk_max: 0.80
+    avoid:
+      sentiment_min: 0.00
+      risk_max: 1.00
+  composite_weights:
+    sentiment: 0.50
+    risk_inverse: 0.50        # weight applied to (1 - risk_score)
+  confidence_thresholds:
+    high: 0.75
+    medium: 0.50
+  verbose: false
+
+
+# -----------------------------------------------------------------------------
+# Vector Store
+# -----------------------------------------------------------------------------
+vector_store:
+  collection_name: financial_news
+  embedding_model: all-MiniLM-L6-v2
+  similarity_metric: cosine
+  search_default_results: 10
+  search_default_threshold: 0.40
+  context_enrichment: true   # Feed historical similar events to ResearchAgent
+
+
+# -----------------------------------------------------------------------------
+# Tools
+# -----------------------------------------------------------------------------
+tools:
+  news:
+    max_results: 10
+    language: en
+    sort_by: relevancy
+    days_back: 7
+
+  stock:
+    days_back: 30             # Historical window for performance metrics
+    primary_source: yfinance  # yfinance | alpha_vantage
+    fallback_to_mock: true
+
+  economic:
+    primary_source: world_bank
+    cache_ttl_hours: 12
+    default_country: US
+    indicators:
+      - gdp_growth
+      - inflation
+      - unemployment
+      - interest_rate
+      - current_account
+      - trade_balance
+
+
+# -----------------------------------------------------------------------------
+# API
+# -----------------------------------------------------------------------------
+api:
+  host: 0.0.0.0
+  port: 8000
+  reload: true               # Set false in production
+  log_level: info
+  rate_limit:
+    enabled: false           # Enable with slowapi in production
+    requests_per_minute: 60
+
+
+# -----------------------------------------------------------------------------
+# Dashboard
+# -----------------------------------------------------------------------------
+dashboard:
+  host: localhost
+  port: 8501
+  default_symbol: AAPL
+  default_days_back: 7
+  auto_refresh_seconds: 300  # 0 = disabled

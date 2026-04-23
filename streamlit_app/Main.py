@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 # Page configuration
 st.set_page_config(
-    page_title="Financial News Analyzer",
+    page_title="📊 Market Intelligence Dashboard",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -74,8 +74,17 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.image("https://via.placeholder.com/200x80/1e3a8a/ffffff?text=FinAnalyzer", 
-                use_column_width=True)
+        st.markdown("""
+        <div style="background:linear-gradient(90deg,#1e3a8a,#3b82f6);
+                    border-radius:0.5rem;padding:0.6rem 1rem;margin-bottom:0.25rem;">
+            <span style="color:white;font-size:1.1rem;font-weight:700;letter-spacing:0.03em;">
+                &#128202; FinAnalyzer
+            </span><br>
+            <span style="color:#bfdbfe;font-size:0.72rem;">
+                AI Investment Research
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown("---")
         
         st.markdown("### 🎯 Quick Actions")

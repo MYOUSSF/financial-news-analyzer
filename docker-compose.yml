@@ -1,61 +1,109 @@
-version: '3.8'
+# =============================================================================
+# Financial News Analyzer — Docker Compose
+# =============================================================================
+# Usage:
+#   docker-compose up -d          # start in background
+#   docker-compose logs -f        # tail logs
+#   docker-compose down           # stop and remove containers
+#   docker-compose down -v        # also remove named volumes
+
+version: "3.9"
 
 services:
-  # Main application
+
+  # ---------------------------------------------------------------------------
+  # Main application (API + Streamlit dashboard)
+  # ---------------------------------------------------------------------------
   app:
-    build: .
-    container_name: financial-analyzer
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    image: financial-analyzer:latest
+    container_name: financial-analyzer-app
+    restart: unless-stopped
     ports:
-      - "8000:8000"  # FastAPI
-      - "8501:8501"  # Streamlit
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - NEWSAPI_KEY=${NEWSAPI_KEY}
-      - ALPHA_VANTAGE_KEY=${ALPHA_VANTAGE_KEY}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - "${API_PORT:-8000}:8000"       # FastAPI
+      - "${DASH_PORT:-8501}:8501"      # Streamlit
     env_file:
       - .env
+    environment:
+      CHROMA_DB_PATH: /app/data/chroma_db
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./config:/app/config
-    restart: unless-stopped
+      # Persist ChromaDB data across container restarts
+      - chroma_data:/app/data/chroma_db
+      # Persist raw/processed data cache
+      - app_data:/app/data/raw
+      - app_data:/app/data/processed
+      # Persist application logs
+      - app_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
+    networks:
+      - financial-net
 
-  # Redis (optional, for caching)
+  # ---------------------------------------------------------------------------
+  # Redis — used for API response caching and rate limiting
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: financial-analyzer-redis
+    restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
-    restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - financial-net
 
-  # PostgreSQL (optional, for production database)
-  # postgres:
-  #   image: postgres:15-alpine
-  #   container_name: financial-analyzer-db
-  #   environment:
-  #     POSTGRES_DB: financial_analyzer
-  #     POSTGRES_USER: ${DB_USER:-finanalyzer}
-  #     POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
+  # ---------------------------------------------------------------------------
+  # Optional: Ollama — local LLM server (comment out if using OpenAI/Anthropic)
+  # ---------------------------------------------------------------------------
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: financial-analyzer-ollama
   #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   environment:
+  #     OLLAMA_HOST: 0.0.0.0
+  #   networks:
+  #     - financial-net
 
+# =============================================================================
+# Named volumes
+# =============================================================================
 volumes:
+  chroma_data:
+    driver: local
+  app_data:
+    driver: local
+  app_logs:
+    driver: local
   redis_data:
-  # postgres_data:
+    driver: local
+  # ollama_data:
+  #   driver: local
 
+# =============================================================================
+# Networks
+# =============================================================================
 networks:
-  default:
-    name: financial-analyzer-network
+  financial-net:
+    driver: bridge

@@ -1,58 +1,72 @@
 """
-Setup configuration for Financial News Analyzer
+setup.py — Package configuration for Financial News Analyzer.
+
+Install in editable mode for development:
+    pip install -e .
+
+Install for production:
+    pip install .
 """
 from setuptools import setup, find_packages
+from pathlib import Path
 
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+# Read the long description from README
+long_description = (Path(__file__).parent / "README.md").read_text(encoding="utf-8")
 
-with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+# Read pinned dependencies from requirements.txt
+requirements = [
+    line.strip()
+    for line in (Path(__file__).parent / "requirements.txt").read_text().splitlines()
+    if line.strip() and not line.startswith("#")
+]
 
 setup(
     name="financial-news-analyzer",
     version="1.0.0",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="MYSSF",
     description="AI-powered financial news analysis and investment research assistant",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/financial-news-analyzer",
-    packages=find_packages(where="src"),
-    package_dir={"": "src"},
+    url="https://github.com/MYSSF/financial-news-analyzer",
+    license="MIT",
+    packages=find_packages(exclude=["tests*", "notebooks*", "docs*"]),
+    python_requires=">=3.9",
+    install_requires=requirements,
+    extras_require={
+        "dev": [
+            "pytest>=8.2.0",
+            "pytest-asyncio>=0.23.6",
+            "pytest-cov>=5.0.0",
+            "pytest-mock>=3.14.0",
+            "black>=24.4.2",
+            "flake8>=7.0.0",
+            "isort>=5.13.2",
+            "mypy>=1.10.0",
+        ],
+        "docs": [
+            "mkdocs>=1.6.0",
+            "mkdocs-material>=9.5.20",
+        ],
+    },
+    entry_points={
+        "console_scripts": [
+            "financial-analyzer=src.cli:main",
+        ],
+    },
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Financial and Insurance Industry",
-        "Topic :: Office/Business :: Financial :: Investment",
+        "Intended Audience :: Developers",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Topic :: Office/Business :: Financial",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    python_requires=">=3.9",
-    install_requires=requirements,
-    extras_require={
-        "dev": [
-            "pytest>=7.0",
-            "pytest-cov>=4.0",
-            "black>=23.0",
-            "flake8>=6.0",
-            "mypy>=1.0",
-            "jupyter>=1.0",
-        ],
-        "docs": [
-            "mkdocs>=1.4",
-            "mkdocs-material>=9.0",
-        ],
-    },
-    entry_points={
-        "console_scripts": [
-            "finanalyzer=cli:main",
-        ],
+    package_data={
+        "": ["config/*.yaml", "config/*.yml"],
     },
     include_package_data=True,
-    package_data={
-        "": ["*.yaml", "*.json", "*.md"],
-    },
 )

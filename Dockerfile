@@ -1,44 +1,89 @@
-# Financial News Analyzer - Dockerfile
-FROM python:3.11-slim
+# =============================================================================
+# Financial News Analyzer — Dockerfile
+# =============================================================================
+# Multi-stage build: builder installs deps, final image stays lean.
+#
+# Build:  docker build -t financial-analyzer .
+# Run:    docker run -p 8501:8501 -p 8000:8000 --env-file .env financial-analyzer
+# =============================================================================
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+# ---------------------------------------------------------------------------
+# Stage 1 — dependency builder
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
 
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    git \
+# System deps needed to compile some Python packages (e.g. lxml, Pillow)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        g++ \
+        curl \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+WORKDIR /build
+
+# Copy only requirements first for better layer caching
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install to a prefix we can copy into the final image
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --prefix=/install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
 
-# Create necessary directories
-RUN mkdir -p data/chroma_db data/cache logs
+# ---------------------------------------------------------------------------
+# Stage 2 — final runtime image
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS final
 
-# Install the package
-RUN pip install -e .
+# Runtime system libraries only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Expose ports
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Create non-root user for security
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# Copy application source
+COPY --chown=appuser:appuser . .
+
+# Create required directories
+RUN mkdir -p data/chroma_db data/raw data/processed logs && \
+    chown -R appuser:appuser data logs
+
+USER appuser
+
+# ---------------------------------------------------------------------------
+# Environment defaults (override via --env-file or -e flags)
+# ---------------------------------------------------------------------------
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    LOG_LEVEL=INFO \
+    CHROMA_DB_PATH=/app/data/chroma_db
+
+# ---------------------------------------------------------------------------
+# Exposed ports
+# ---------------------------------------------------------------------------
+# 8000 — FastAPI REST API
+# 8501 — Streamlit dashboard
 EXPOSE 8000 8501
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+# ---------------------------------------------------------------------------
+# Health check — polls the FastAPI health endpoint
+# ---------------------------------------------------------------------------
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command (can be overridden)
-CMD ["sh", "-c", "uvicorn src.api.main:app --host 0.0.0.0 --port 8000 & streamlit run streamlit_app/app.py --server.port 8501 --server.address 0.0.0.0"]
+# ---------------------------------------------------------------------------
+# Default command — starts both services via the entrypoint script
+# ---------------------------------------------------------------------------
+COPY --chown=appuser:appuser docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+CMD ["/app/docker-entrypoint.sh"]
