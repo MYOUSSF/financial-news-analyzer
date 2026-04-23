@@ -128,8 +128,3 @@ LOG_LEVEL=INFO
 4. Show results in tabs
 5. Explain architecture
 6. Show API docs
-
-## Contact
-
-GitHub: [your-repo-url]  
-Email: your.email@example.com  

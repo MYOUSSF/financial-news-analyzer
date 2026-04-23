@@ -353,13 +353,6 @@ CACHE_TYPE=disk  # disk, memory, redis
 - Share feedback
 - Add documentation
 
-## Getting Help
-
-- **Documentation**: Check the `docs/` folder
-- **Examples**: See `notebooks/` for examples
-- **Issues**: Open an issue on GitHub
-- **Email**: your.email@example.com
-
 ## Quick Reference
 
 ### Common Commands
