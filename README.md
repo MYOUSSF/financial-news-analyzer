@@ -4,7 +4,7 @@
 [![LangChain](https://img.shields.io/badge/LangChain-0.1.0+-green.svg)](https://python.langchain.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A production-ready AI-powered financial research assistant that analyzes real-time market news, performs sentiment analysis, and generates actionable investment insights using LangChain's multi-agent architecture.
+A production-ready AI-powered financial research assistant that analyzes real-time market news, performs sentiment analysis, and generates actionable investment insights using LangChain's multi-agent architecture, live at [financial-news-analyzer.streamlit.app](https://financial-news-analyzer.streamlit.app/).
 
 ![Dashboard Preview](docs/images/dashboard_preview.png)
 
