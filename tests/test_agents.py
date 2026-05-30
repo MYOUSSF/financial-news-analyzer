@@ -986,6 +986,101 @@ class TestFinancialAnalysisChainAsync:
 
 
 # ===========================================================================
+# _build_llm() / retry tests
+# ===========================================================================
+
+class TestBuildLlm:
+    """Tests for _build_llm() retry configuration and _wrap_ollama_with_retry()."""
+
+    def test_ollama_retries_on_first_failure(self):
+        """invoke() is retried when the first call raises; second call succeeds."""
+        from unittest.mock import MagicMock, patch
+        from src.chains.analysis_chain import _wrap_ollama_with_retry
+
+        success_response = MagicMock()
+        success_response.content = "OK"
+
+        # Save a reference to the original mock *before* wrapping replaces llm.invoke.
+        original_invoke = MagicMock(side_effect=[
+            Exception("503 service unavailable"),
+            success_response,
+        ])
+        mock_llm = MagicMock()
+        mock_llm.invoke = original_invoke
+
+        wrapped = _wrap_ollama_with_retry(mock_llm, max_retries=3)
+        with patch("time.sleep"):  # suppress tenacity back-off delay in tests
+            result = wrapped.invoke("test prompt")
+
+        assert result.content == "OK"
+        assert original_invoke.call_count == 2
+
+    def test_ollama_raises_after_max_retries_exhausted(self):
+        """After max_retries failed attempts the original exception is re-raised."""
+        from unittest.mock import MagicMock, patch
+        from src.chains.analysis_chain import _wrap_ollama_with_retry
+
+        original_invoke = MagicMock(side_effect=Exception("429 rate limited"))
+        mock_llm = MagicMock()
+        mock_llm.invoke = original_invoke
+
+        wrapped = _wrap_ollama_with_retry(mock_llm, max_retries=3)
+        with patch("time.sleep"), pytest.raises(Exception, match="429 rate limited"):
+            wrapped.invoke("test prompt")
+
+        assert original_invoke.call_count == 3
+
+    def test_openai_max_retries_passed_to_constructor(self, monkeypatch):
+        """ChatOpenAI receives max_retries from OPENAI_MAX_RETRIES env var."""
+        import sys
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_MAX_RETRIES", "5")
+
+        from src.chains.analysis_chain import _build_llm
+        mock_cls = MagicMock()
+        mock_openai_module = MagicMock()
+        mock_openai_module.ChatOpenAI = mock_cls
+        with patch.dict(sys.modules, {"langchain_openai": mock_openai_module}):
+            _build_llm(provider="openai")
+
+        _, kwargs = mock_cls.call_args
+        assert kwargs["max_retries"] == 5
+
+    def test_anthropic_max_retries_passed_to_constructor(self, monkeypatch):
+        """ChatAnthropic receives max_retries from OPENAI_MAX_RETRIES env var."""
+        import sys
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("OPENAI_MAX_RETRIES", "2")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        from src.chains.analysis_chain import _build_llm
+        mock_cls = MagicMock()
+        mock_anthropic_module = MagicMock()
+        mock_anthropic_module.ChatAnthropic = mock_cls
+        with patch.dict(sys.modules, {"langchain_anthropic": mock_anthropic_module}):
+            _build_llm(provider="anthropic")
+
+        _, kwargs = mock_cls.call_args
+        assert kwargs["max_retries"] == 2
+
+    def test_openai_max_retries_defaults_to_three(self, monkeypatch):
+        """When OPENAI_MAX_RETRIES is unset, max_retries defaults to 3."""
+        import sys
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_MAX_RETRIES", raising=False)
+
+        from src.chains.analysis_chain import _build_llm
+        mock_cls = MagicMock()
+        mock_openai_module = MagicMock()
+        mock_openai_module.ChatOpenAI = mock_cls
+        with patch.dict(sys.modules, {"langchain_openai": mock_openai_module}):
+            _build_llm(provider="openai")
+
+        _, kwargs = mock_cls.call_args
+        assert kwargs["max_retries"] == 3
+
+
+# ===========================================================================
 # Session-scoped fixtures
 # ===========================================================================
 

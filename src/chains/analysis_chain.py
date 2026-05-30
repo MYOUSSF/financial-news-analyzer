@@ -39,6 +39,42 @@ def _load_cache_config() -> Dict[str, Any]:
         return {}
 
 
+def _make_retry_log_callback(max_retries: int):
+    """Return a tenacity before_sleep callback that logs a warning on each retry."""
+    def _before_sleep(retry_state) -> None:
+        exc = retry_state.outcome.exception()
+        n = retry_state.attempt_number
+        logger.warning(
+            f"LLM request failed (attempt {n}/{max_retries}): {exc}. Retrying..."
+        )
+    return _before_sleep
+
+
+def _wrap_ollama_with_retry(llm: Any, max_retries: int = 3) -> Any:
+    """
+    Patch ChatOllama's invoke in-place with tenacity exponential-backoff retries.
+
+    ChatOllama does not support a native max_retries constructor argument, so we
+    wrap the instance method instead.  The original llm object is returned with
+    its invoke method replaced so callers need no extra handling.
+    """
+    import tenacity
+
+    original_invoke = llm.invoke
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(max_retries),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        before_sleep=_make_retry_log_callback(max_retries),
+        reraise=True,
+    )
+    def _invoke_with_retry(*args, **kwargs):
+        return original_invoke(*args, **kwargs)
+
+    llm.invoke = _invoke_with_retry
+    return llm
+
+
 def _build_llm(provider: str = "auto", temperature: float = 0.3) -> Any:
     """
     Instantiate the configured LLM.
@@ -48,6 +84,13 @@ def _build_llm(provider: str = "auto", temperature: float = 0.3) -> Any:
       2. OPENAI_API_KEY   → ChatOpenAI
       3. ANTHROPIC_API_KEY → ChatAnthropic
       4. OLLAMA_BASE_URL  → ChatOllama (local)
+
+    Retry behaviour:
+      - OpenAI / Anthropic: max_retries passed to the constructor; LangChain
+        handles exponential back-off internally.
+      - Ollama: invoke() is wrapped with a tenacity retry loop (Ollama's
+        ChatOllama does not accept max_retries).
+      - Retry count is read from OPENAI_MAX_RETRIES (default 3).
 
     Args:
         provider: Force a specific provider, or "auto" to detect from env.
@@ -59,24 +102,29 @@ def _build_llm(provider: str = "auto", temperature: float = 0.3) -> Any:
     Raises:
         EnvironmentError: If no LLM provider can be configured.
     """
+    max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
+
     if provider in ("openai", "auto") and os.getenv("OPENAI_API_KEY"):
         from langchain_openai import ChatOpenAI
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        logger.info(f"LLM provider: OpenAI ({model})")
-        return ChatOpenAI(model=model, temperature=temperature)
+        logger.info(f"LLM provider: OpenAI ({model}, max_retries={max_retries})")
+        return ChatOpenAI(model=model, temperature=temperature, max_retries=max_retries)
 
     if provider in ("anthropic", "auto") and os.getenv("ANTHROPIC_API_KEY"):
         from langchain_anthropic import ChatAnthropic
         model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        logger.info(f"LLM provider: Anthropic ({model})")
-        return ChatAnthropic(model=model, temperature=temperature)
+        logger.info(f"LLM provider: Anthropic ({model}, max_retries={max_retries})")
+        return ChatAnthropic(model=model, temperature=temperature, max_retries=max_retries)
 
     if provider in ("ollama", "auto") and os.getenv("OLLAMA_BASE_URL"):
         from langchain_community.chat_models import ChatOllama
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         model = os.getenv("OLLAMA_MODEL", "llama3")
-        logger.info(f"LLM provider: Ollama ({base_url}, {model})")
-        return ChatOllama(base_url=base_url, model=model, temperature=temperature)
+        logger.info(
+            f"LLM provider: Ollama ({base_url}, {model}, max_retries={max_retries})"
+        )
+        llm = ChatOllama(base_url=base_url, model=model, temperature=temperature)
+        return _wrap_ollama_with_retry(llm, max_retries=max_retries)
 
     raise EnvironmentError(
         "No LLM provider configured. Set one of: "
