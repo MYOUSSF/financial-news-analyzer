@@ -4,6 +4,7 @@ Sentiment Agent - Performs sentiment analysis on financial news and market data.
 import asyncio
 import hashlib
 import threading
+import warnings
 from typing import Any, Dict, List, Tuple
 from datetime import datetime
 from loguru import logger
@@ -41,11 +42,17 @@ def get_sentiment_pipeline():
             if not _PIPELINE_LOADED:  # double-checked
                 try:
                     from transformers import pipeline as _hf_pipeline
-                    _SENTIMENT_PIPELINE = _hf_pipeline(
-                        "sentiment-analysis",
-                        model="ProsusAI/finbert",
-                        device=-1,  # CPU
-                    )
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            category=DeprecationWarning,
+                            message=r".*WordPiece.__init__.*from files.*",
+                        )
+                        _SENTIMENT_PIPELINE = _hf_pipeline(
+                            "sentiment-analysis",
+                            model="ProsusAI/finbert",
+                            device=-1,  # CPU
+                        )
                     logger.info("Loaded sentiment analysis model")
                 except ImportError:
                     logger.warning(

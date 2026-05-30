@@ -20,8 +20,23 @@ from loguru import logger
 from dotenv import load_dotenv
 
 from src.agents.base import AgentExecutionError
+from src.utils.cache import CacheClient
 
 load_dotenv()
+
+
+def _load_cache_config() -> Dict[str, Any]:
+    """Read the ``cache`` section from agents_config.yaml; return defaults on failure."""
+    try:
+        import yaml
+        config_path = os.path.join(
+            os.path.dirname(__file__), "../../config/agents_config.yaml"
+        )
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("cache", {})
+    except Exception:
+        return {}
 
 
 def _build_llm(provider: str = "auto", temperature: float = 0.3) -> Any:
@@ -116,6 +131,11 @@ class FinancialAnalysisChain:
         # ── Vector store (optional — used for context enrichment) ─────────
         self.vector_store = self._init_vector_store(chroma_db_path)
 
+        # ── Cache (optional — Redis with in-memory fallback) ──────────────
+        cache_cfg = _load_cache_config()
+        self._cache_ttl_seconds: int = int(cache_cfg.get("ttl_hours", 4)) * 3600
+        self.cache: Optional[CacheClient] = self._init_cache(cache_cfg)
+
         logger.info("FinancialAnalysisChain initialized successfully.")
 
     # ------------------------------------------------------------------
@@ -188,6 +208,18 @@ class FinancialAnalysisChain:
         parallel with SentimentAgent and cannot depend on its output.
         """
         symbol = symbol.upper()
+
+        # ── Cache check ───────────────────────────────────────────────────
+        cache_key: Optional[str] = None
+        if self.cache is not None:
+            cache_key = self.cache.make_cache_key(
+                symbol, days_back, datetime.now().strftime("%Y-%m-%d-%H")
+            )
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"Cache hit for {symbol} ({cache_key})")
+                return {**cached, "cache_hit": True}
+
         logger.info(f"Starting async pipeline for {symbol} (days_back={days_back})")
         pipeline_start = datetime.now()
 
@@ -297,7 +329,7 @@ class FinancialAnalysisChain:
             f"Recommendation: {summary_result.get('recommendation', 'N/A')}"
         )
 
-        return {
+        result = {
             **summary_result,
             "summary": summary_result.get("executive_summary", ""),
             "sentiment_score": sentiment_result.get("sentiment_score", None),
@@ -310,6 +342,13 @@ class FinancialAnalysisChain:
             "_risk": risk_result,
             "_elapsed_seconds": round(elapsed, 2),
         }
+
+        # ── Cache store ───────────────────────────────────────────────────
+        if cache_key is not None and "status" not in result:
+            self.cache.set(cache_key, result, ttl_seconds=self._cache_ttl_seconds)
+            logger.debug(f"Cached analysis for {symbol} (TTL={self._cache_ttl_seconds}s)")
+
+        return result
 
     def batch_analyze(
         self,
@@ -414,6 +453,17 @@ class FinancialAnalysisChain:
         self.summary_agent = SummaryAgent(
             llm=self.llm, tools=[], verbose=self.verbose
         )
+
+    def _init_cache(self, cache_cfg: Dict[str, Any]) -> Optional[CacheClient]:
+        """Initialize the cache client; return None when caching is disabled."""
+        if not cache_cfg.get("enabled", True):
+            logger.info("Cache: disabled by configuration")
+            return None
+        try:
+            return CacheClient(redis_url=os.getenv("REDIS_URL"))
+        except Exception as exc:
+            logger.warning(f"Cache initialization failed: {exc}")
+            return None
 
     def _init_vector_store(self, db_path: Optional[str]) -> Optional[Any]:
         """Initialize the vector store; return None on failure (non-fatal)."""

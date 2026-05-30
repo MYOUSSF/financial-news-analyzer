@@ -724,12 +724,17 @@ class TestSummaryAgent:
 # ===========================================================================
 
 class TestFinancialAnalysisChain:
-    """Tests for FinancialAnalysisChain error propagation and fail_fast behaviour."""
+    """Tests for FinancialAnalysisChain error propagation and fail_fast behaviour.
+
+    analyze_stock() delegates to analyze_stock_async() internally, so all mocks
+    must be AsyncMock on aexecute() rather than plain Mock on execute().
+    """
 
     @pytest.fixture
     def chain(self):
-        """Return a chain whose agents are all replaced by controllable Mocks."""
+        """Return a chain whose agents are all replaced by controllable AsyncMocks."""
         from src.chains.analysis_chain import FinancialAnalysisChain
+        from unittest.mock import AsyncMock
 
         mock_llm = _make_llm()
         with patch.object(FinancialAnalysisChain, "_build_tools", return_value=[]), \
@@ -743,19 +748,19 @@ class TestFinancialAnalysisChain:
         c.summary_agent = Mock()
         c.vector_store = None
 
-        # Default success responses
-        c.research_agent.execute.return_value = {
+        # Default success responses (AsyncMock — used by analyze_stock_async)
+        c.research_agent.aexecute = AsyncMock(return_value={
             "symbol": "AAPL", "findings": "Strong Q4.", "sources_used": [], "period_days": 7,
-        }
-        c.sentiment_agent.execute.return_value = {
+        })
+        c.sentiment_agent.aexecute = AsyncMock(return_value={
             "symbol": "AAPL", "overall_sentiment": "POSITIVE", "sentiment_score": 0.7,
             "confidence": 0.8, "text_count": 1, "llm_analysis": {"analysis": "good"},
-        }
-        c.risk_agent.execute.return_value = {
+        })
+        c.risk_agent.aexecute = AsyncMock(return_value={
             "symbol": "AAPL", "overall_risk_score": 0.3, "risk_level": "LOW",
             "identified_risks": [], "alerts": [], "recommendations": [],
-        }
-        c.summary_agent.execute.return_value = {
+        })
+        c.summary_agent.aexecute = AsyncMock(return_value={
             "symbol": "AAPL", "recommendation": "BUY", "executive_summary": "Looks good.",
             "key_positives": [], "key_negatives": [], "action_items": [],
             "scores": {"sentiment_score": 0.7, "risk_score": 0.3,
@@ -763,7 +768,7 @@ class TestFinancialAnalysisChain:
             "confidence": 0.8, "confidence_label": "HIGH",
             "analysis_date": "2024-01-01T00:00:00", "period_days": 7,
             "full_report": "", "metadata": {},
-        }
+        })
         return c
 
     def _make_agent_error(self, agent_name: str) -> AgentExecutionError:
@@ -777,31 +782,31 @@ class TestFinancialAnalysisChain:
 
     def test_research_failure_continues_pipeline(self, chain):
         """Research failure with fail_fast=False: downstream agents still run."""
-        chain.research_agent.execute.side_effect = self._make_agent_error("ResearchAgent")
+        chain.research_agent.aexecute.side_effect = self._make_agent_error("ResearchAgent")
         result = chain.analyze_stock("AAPL")
-        chain.sentiment_agent.execute.assert_called_once()
-        chain.risk_agent.execute.assert_called_once()
-        chain.summary_agent.execute.assert_called_once()
+        chain.sentiment_agent.aexecute.assert_called_once()
+        chain.risk_agent.aexecute.assert_called_once()
+        chain.summary_agent.aexecute.assert_called_once()
         assert result["recommendation"] == "BUY"
 
     def test_sentiment_failure_continues_pipeline(self, chain):
         """Sentiment failure with fail_fast=False: risk and summary still run."""
-        chain.sentiment_agent.execute.side_effect = self._make_agent_error("SentimentAgent")
+        chain.sentiment_agent.aexecute.side_effect = self._make_agent_error("SentimentAgent")
         result = chain.analyze_stock("AAPL")
-        chain.risk_agent.execute.assert_called_once()
-        chain.summary_agent.execute.assert_called_once()
+        chain.risk_agent.aexecute.assert_called_once()
+        chain.summary_agent.aexecute.assert_called_once()
         assert result["recommendation"] == "BUY"
 
     def test_risk_failure_continues_pipeline(self, chain):
         """Risk failure with fail_fast=False: summary still runs."""
-        chain.risk_agent.execute.side_effect = self._make_agent_error("RiskAgent")
+        chain.risk_agent.aexecute.side_effect = self._make_agent_error("RiskAgent")
         result = chain.analyze_stock("AAPL")
-        chain.summary_agent.execute.assert_called_once()
+        chain.summary_agent.aexecute.assert_called_once()
         assert result["recommendation"] == "BUY"
 
     def test_summary_failure_always_returns_error(self, chain):
         """Summary failure is always surfaced regardless of fail_fast."""
-        chain.summary_agent.execute.side_effect = self._make_agent_error("SummaryAgent")
+        chain.summary_agent.aexecute.side_effect = self._make_agent_error("SummaryAgent")
         result = chain.analyze_stock("AAPL", fail_fast=False)
         assert result["status"] == "failed"
         assert result["failed_stage"] == "summary"
@@ -810,28 +815,30 @@ class TestFinancialAnalysisChain:
 
     def test_research_failure_halts_on_fail_fast(self, chain):
         """Research failure with fail_fast=True: pipeline halts, returns error dict."""
-        chain.research_agent.execute.side_effect = self._make_agent_error("ResearchAgent")
+        chain.research_agent.aexecute.side_effect = self._make_agent_error("ResearchAgent")
         result = chain.analyze_stock("AAPL", fail_fast=True)
         assert result["status"] == "failed"
         assert result["symbol"] == "AAPL"
         assert result["failed_stage"] == "research"
         assert "error" in result
-        chain.sentiment_agent.execute.assert_not_called()
-        chain.risk_agent.execute.assert_not_called()
-        chain.summary_agent.execute.assert_not_called()
+        # Research fails before the parallel stage — sentiment and risk never start
+        chain.sentiment_agent.aexecute.assert_not_called()
+        chain.risk_agent.aexecute.assert_not_called()
+        chain.summary_agent.aexecute.assert_not_called()
 
     def test_sentiment_failure_halts_on_fail_fast(self, chain):
-        """Sentiment failure with fail_fast=True stops before risk and summary."""
-        chain.sentiment_agent.execute.side_effect = self._make_agent_error("SentimentAgent")
+        """Sentiment failure with fail_fast=True: pipeline returns error before summary."""
+        chain.sentiment_agent.aexecute.side_effect = self._make_agent_error("SentimentAgent")
         result = chain.analyze_stock("AAPL", fail_fast=True)
         assert result["status"] == "failed"
         assert result["failed_stage"] == "sentiment"
-        chain.risk_agent.execute.assert_not_called()
-        chain.summary_agent.execute.assert_not_called()
+        # Summary is never invoked when fail_fast=True and sentiment fails
+        chain.summary_agent.aexecute.assert_not_called()
+        # Risk runs in parallel with sentiment, so it may have been called
 
     def test_error_response_contains_agent_message(self, chain):
         """The error string in the top-level response names the failing agent."""
-        chain.research_agent.execute.side_effect = self._make_agent_error("ResearchAgent")
+        chain.research_agent.aexecute.side_effect = self._make_agent_error("ResearchAgent")
         result = chain.analyze_stock("AAPL", fail_fast=True)
         assert "ResearchAgent" in result["error"]
 

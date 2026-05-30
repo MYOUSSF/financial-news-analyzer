@@ -9,6 +9,8 @@ pytest
 pytest-cov
 pytest-mock
 pytest-asyncio
+freezegun
+redis
 
 # Core runtime deps the agents import at module level
 loguru
