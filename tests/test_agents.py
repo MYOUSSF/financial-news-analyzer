@@ -17,11 +17,11 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-from src.agents.base import BaseAgent
+from src.agents.base import AgentExecutionError, BaseAgent
 from src.agents.research_agent import ResearchAgent
 from src.agents.sentiment_agent import SentimentAgent
 from src.agents.risk_agent import RiskAgent
-from src.agents.summary_agent import SummaryAgent
+from src.agents.summary_agent import SummaryAgent, SynthesisOutput
 
 
 # ===========================================================================
@@ -33,12 +33,37 @@ def _make_llm(response_text: str = "Mock LLM response") -> Mock:
     llm = Mock()
     response = Mock()
     response.content = response_text
+    # Explicitly set tool_calls to an empty list so isinstance checks pass correctly
+    response.tool_calls = []
     # Support both .invoke() (chat models) and .predict() (older LLMChain style)
     llm.invoke.return_value = response
     llm.predict.return_value = response_text
     # bind_tools returns a clone that also has invoke()
     llm.bind_tools.return_value = llm
     return llm
+
+
+def _make_tool(name: str, run_result: str = "tool result") -> Mock:
+    """Build a mock LangChain tool with a predictable _run() return value."""
+    tool = Mock()
+    tool.name = name
+    tool._run.return_value = run_result
+    return tool
+
+
+def _make_synthesis_output(**overrides) -> SynthesisOutput:
+    """Build a SynthesisOutput instance with sensible defaults for tests."""
+    defaults = {
+        "executive_summary": "Apple demonstrated strong fundamentals with positive market sentiment.",
+        "key_positives": ["Strong earnings beat expectations", "Growing services revenue"],
+        "key_negatives": ["EU regulatory scrutiny", "Supply chain pressure"],
+        "recommendation": "HOLD",
+        "recommendation_rationale": "Current risk/reward supports maintaining positions.",
+        "confidence_label": "HIGH",
+        "action_items": ["Monitor volatility over next 30 days", "Review position sizing"],
+    }
+    defaults.update(overrides)
+    return SynthesisOutput(**defaults)
 
 
 # ===========================================================================
@@ -160,9 +185,10 @@ class TestResearchAgent:
 
     def test_execute_error_handling(self, agent):
         agent.llm.bind_tools.return_value.invoke.side_effect = RuntimeError("LLM unavailable")
-        result = agent.execute({"symbol": "FAIL"})
-        assert "error" in result
-        assert result["status"] == "failed"
+        with pytest.raises(AgentExecutionError) as exc_info:
+            agent.execute({"symbol": "FAIL"})
+        assert exc_info.value.agent_name == "ResearchAgent"
+        assert isinstance(exc_info.value.original_error, RuntimeError)
 
     def test_batch_research(self, agent):
         with patch.object(agent, "execute") as mock_exec:
@@ -186,6 +212,103 @@ class TestResearchAgent:
         result_obj.content = "no tools mentioned"
         sources = agent._extract_sources(result_obj)
         assert isinstance(sources, list)
+
+    def test_execute_tool_loop_executes_tools(self):
+        """Tool calls returned by the LLM are executed and results fed back."""
+        mock_tool = _make_tool("financial_news_search", "AAPL Q4 earnings beat expectations.")
+
+        first_response = Mock()
+        first_response.content = ""
+        first_response.tool_calls = [
+            {"name": "financial_news_search", "args": {"query": "AAPL news"}, "id": "call_1"}
+        ]
+
+        second_response = Mock()
+        second_response.content = "Research complete based on tool output."
+        second_response.tool_calls = []
+
+        mock_llm = _make_llm()
+        mock_llm.invoke.side_effect = [first_response, second_response]
+
+        agent = ResearchAgent(llm=mock_llm, tools=[mock_tool], verbose=False)
+        result = agent.execute({"symbol": "AAPL", "days_back": 7})
+
+        mock_tool._run.assert_called_once()
+        assert mock_llm.invoke.call_count == 2
+        assert "financial_news_search" in result["sources_used"]
+        assert result["symbol"] == "AAPL"
+        assert result["findings"] == "Research complete based on tool output."
+
+    def test_execute_tool_loop_max_iterations(self):
+        """Loop stops after max_iterations even if the LLM keeps returning tool_calls."""
+        mock_tool = _make_tool("stock_data", "price: 150")
+
+        always_tool_response = Mock()
+        always_tool_response.content = "Still calling tools..."
+        always_tool_response.tool_calls = [
+            {"name": "stock_data", "args": {"query": "AAPL"}, "id": "call_x"}
+        ]
+
+        mock_llm = _make_llm()
+        mock_llm.invoke.return_value = always_tool_response
+
+        agent = ResearchAgent(llm=mock_llm, tools=[mock_tool], verbose=False)
+        result = agent.execute({"symbol": "AAPL", "days_back": 7})
+
+        assert mock_llm.invoke.call_count <= agent.max_iterations
+        assert "symbol" in result
+
+    def test_execute_sources_collected_across_iterations(self):
+        """Sources from multiple tool calls across iterations are all preserved."""
+        tool_a = _make_tool("news_search", "news result")
+        tool_b = _make_tool("stock_data", "stock result")
+
+        first_response = Mock()
+        first_response.content = ""
+        first_response.tool_calls = [
+            {"name": "news_search", "args": {"query": "AAPL"}, "id": "c1"}
+        ]
+
+        second_response = Mock()
+        second_response.content = ""
+        second_response.tool_calls = [
+            {"name": "stock_data", "args": {"query": "AAPL"}, "id": "c2"}
+        ]
+
+        third_response = Mock()
+        third_response.content = "Final analysis."
+        third_response.tool_calls = []
+
+        mock_llm = _make_llm()
+        mock_llm.invoke.side_effect = [first_response, second_response, third_response]
+
+        agent = ResearchAgent(llm=mock_llm, tools=[tool_a, tool_b], verbose=False)
+        result = agent.execute({"symbol": "AAPL", "days_back": 7})
+
+        assert "news_search" in result["sources_used"]
+        assert "stock_data" in result["sources_used"]
+        assert mock_llm.invoke.call_count == 3
+
+    def test_execute_unknown_tool_handled_gracefully(self):
+        """If the LLM requests an unknown tool, the loop continues without crashing."""
+        first_response = Mock()
+        first_response.content = ""
+        first_response.tool_calls = [
+            {"name": "nonexistent_tool", "args": {"query": "X"}, "id": "c1"}
+        ]
+
+        second_response = Mock()
+        second_response.content = "Done."
+        second_response.tool_calls = []
+
+        mock_llm = _make_llm()
+        mock_llm.invoke.side_effect = [first_response, second_response]
+
+        agent = ResearchAgent(llm=mock_llm, tools=[], verbose=False)
+        result = agent.execute({"symbol": "TEST", "days_back": 7})
+
+        assert result["symbol"] == "TEST"
+        assert "error" not in result
 
 
 # ===========================================================================
@@ -230,11 +353,11 @@ class TestSentimentAgent:
         assert "error" in result
 
     def test_execute_error_handling(self, agent):
-        agent.llm.predict.side_effect = RuntimeError("LLM error")
-        agent.llm.invoke.side_effect = RuntimeError("LLM error")
-        result = agent.execute({"symbol": "ERR", "text": "some text"})
-        # Should return error dict, not raise
-        assert "symbol" in result
+        with patch.object(agent, "_combine_sentiments", side_effect=RuntimeError("combine error")):
+            with pytest.raises(AgentExecutionError) as exc_info:
+                agent.execute({"symbol": "ERR", "text": "some text"})
+        assert exc_info.value.agent_name == "SentimentAgent"
+        assert isinstance(exc_info.value.original_error, RuntimeError)
 
     def test_normalize_score_positive(self, agent):
         assert agent._normalize_score("POSITIVE", 0.9) == pytest.approx(0.9)
@@ -244,6 +367,16 @@ class TestSentimentAgent:
 
     def test_normalize_score_neutral(self, agent):
         assert agent._normalize_score("NEUTRAL", 0.5) == pytest.approx(0.0)
+
+    # FinBERT returns lowercase labels — verify case-insensitive handling
+    def test_normalize_score_finbert_positive(self, agent):
+        assert agent._normalize_score("positive", 0.9) == pytest.approx(0.9)
+
+    def test_normalize_score_finbert_negative(self, agent):
+        assert agent._normalize_score("negative", 0.8) == pytest.approx(-0.8)
+
+    def test_normalize_score_finbert_neutral(self, agent):
+        assert agent._normalize_score("neutral", 0.6) == pytest.approx(0.0)
 
     def test_combine_sentiments_empty_ml(self, agent):
         result = agent._combine_sentiments([], {"analysis": "positive"})
@@ -284,9 +417,31 @@ class TestSentimentAgent:
         assert result["trend"] == "declining"
 
     def test_ml_analysis_without_pipeline(self, agent):
-        agent.sentiment_pipeline = None
-        result = agent._analyze_with_ml(["test text"])
+        with patch("src.agents.sentiment_agent.get_sentiment_pipeline", return_value=None):
+            result = agent._analyze_with_ml(["test text"])
         assert result == []
+
+    def test_execute_deduplicates_identical_articles(self, agent):
+        articles = [
+            "Apple Q4 earnings beat expectations.",
+            "Apple Q4 earnings beat expectations.",  # exact duplicate
+        ]
+        result = agent.execute({"symbol": "AAPL", "articles": articles})
+        assert result["text_count"] == 1
+        assert result["dedup_count"] == 1
+
+    def test_execute_deduplicates_by_url_when_metadata_provided(self, agent):
+        articles = ["Article body A.", "Article body B (different text, same URL)."]
+        metadata = [{"url": "https://example.com/story"}, {"url": "https://example.com/story"}]
+        result = agent.execute({"symbol": "AAPL", "articles": articles, "metadata": metadata})
+        assert result["text_count"] == 1
+        assert result["dedup_count"] == 1
+
+    def test_execute_no_duplicates_preserves_all(self, agent):
+        articles = ["First unique article.", "Second unique article."]
+        result = agent.execute({"symbol": "AAPL", "articles": articles})
+        assert result["text_count"] == 2
+        assert result["dedup_count"] == 0
 
 
 # ===========================================================================
@@ -330,9 +485,10 @@ class TestRiskAgent:
 
     def test_execute_error_handling(self, agent):
         agent.llm.invoke.side_effect = RuntimeError("LLM down")
-        result = agent.execute({"symbol": "FAIL"})
-        assert result["status"] == "failed"
-        assert "error" in result
+        with pytest.raises(AgentExecutionError) as exc_info:
+            agent.execute({"symbol": "FAIL"})
+        assert exc_info.value.agent_name == "RiskAgent"
+        assert isinstance(exc_info.value.original_error, RuntimeError)
 
     def test_calculate_risk_score_no_risks(self, agent):
         result = agent._calculate_risk_score([], {"sentiment_score": 0.5})
@@ -375,10 +531,37 @@ class TestRiskAgent:
         assert len(recs) > 0
 
     def test_parse_risks_detects_keywords(self, agent):
-        analysis = "There is an ongoing investigation and regulatory compliance issue. Cash flow is declining."
-        risks = agent._parse_risks(analysis)
+        # Symbol appears right next to the keywords → risks are directly scoped
+        analysis = "AAPL faces an ongoing investigation and compliance issue. Cash flow is declining."
+        risks = agent._parse_risks(analysis, "AAPL")
         categories = {r["category"] for r in risks}
         assert "regulatory" in categories or "financial" in categories
+        # All detected risks should be directly attributed to AAPL
+        for r in risks:
+            assert "scoped" in r
+
+    def test_parse_risks_direct_mention_is_scoped(self, agent):
+        analysis = "AAPL is under investigation by the SEC for accounting irregularities."
+        risks = agent._parse_risks(analysis, "AAPL")
+        regulatory = [r for r in risks if r["category"] == "regulatory"]
+        assert len(regulatory) == 1
+        assert regulatory[0]["scoped"] is True
+        assert regulatory[0]["likelihood"] == 0.6
+
+    def test_parse_risks_competitor_mention_has_reduced_likelihood(self, agent):
+        # "investigation" is about a named competitor; AAPL is mentioned far away
+        # (>150 chars from the keyword) so the risk should be indirect/unscoped.
+        analysis = (
+            "Apple (AAPL) reported strong Q4 results with record iPhone sales and "
+            "robust services growth, showing resilience in a challenging macro environment. "
+            "Meanwhile, competitor MegaCorp is under investigation by the FTC for antitrust "
+            "violations related to its acquisition practices."
+        )
+        risks = agent._parse_risks(analysis, "AAPL")
+        regulatory = [r for r in risks if r["category"] == "regulatory"]
+        assert len(regulatory) == 1
+        assert regulatory[0]["scoped"] is False
+        assert regulatory[0]["likelihood"] == 0.3
 
     def test_format_news_string(self, agent):
         assert agent._format_news("some news") == "some news"
@@ -401,34 +584,11 @@ class TestRiskAgent:
 class TestSummaryAgent:
     """Test cases for SummaryAgent."""
 
-    LLM_RESPONSE = """
-    EXECUTIVE SUMMARY
-    Apple demonstrated strong fundamentals with positive market sentiment and manageable risks.
-
-    KEY POSITIVES
-    - Strong earnings beat expectations
-    - Growing services revenue
-    - Institutional accumulation
-
-    KEY NEGATIVES / RISKS
-    - EU regulatory scrutiny
-    - Supply chain pressure
-
-    INVESTMENT RECOMMENDATION
-    HOLD — current risk/reward supports maintaining positions.
-
-    CONFIDENCE LEVEL
-    HIGH — data from all three agents was consistent and reliable.
-
-    IMMEDIATE ACTION ITEMS
-    1. Monitor volatility over next 30 days
-    2. Review position sizing relative to portfolio risk
-    3. Watch for regulatory updates in EU markets
-    """
-
     @pytest.fixture
     def agent(self):
-        return SummaryAgent(llm=_make_llm(self.LLM_RESPONSE), verbose=False)
+        llm = _make_llm()
+        llm.with_structured_output.return_value.invoke.return_value = _make_synthesis_output()
+        return SummaryAgent(llm=llm, verbose=False)
 
     @pytest.fixture
     def full_input(self):
@@ -498,10 +658,11 @@ class TestSummaryAgent:
         assert "error" not in result or result.get("status") == "failed"
 
     def test_execute_error_handling(self, agent):
-        agent.llm.invoke.side_effect = RuntimeError("LLM unavailable")
-        result = agent.execute({"symbol": "FAIL", "research": {}, "sentiment": {}, "risk": {}})
-        assert result["status"] == "failed"
-        assert "error" in result
+        agent.llm.with_structured_output.return_value.invoke.side_effect = RuntimeError("LLM unavailable")
+        with pytest.raises(AgentExecutionError) as exc_info:
+            agent.execute({"symbol": "FAIL", "research": {}, "sentiment": {}, "risk": {}})
+        assert exc_info.value.agent_name == "SummaryAgent"
+        assert isinstance(exc_info.value.original_error, RuntimeError)
 
     def test_derive_recommendation_strong_buy(self, agent):
         rec = agent._derive_recommendation(sentiment_score=0.85, risk_score=0.20)
@@ -556,6 +717,265 @@ class TestSummaryAgent:
 
     def test_format_risk_empty(self, agent):
         assert "No risk data" in agent._format_risk({})
+
+
+# ===========================================================================
+# FinancialAnalysisChain tests
+# ===========================================================================
+
+class TestFinancialAnalysisChain:
+    """Tests for FinancialAnalysisChain error propagation and fail_fast behaviour."""
+
+    @pytest.fixture
+    def chain(self):
+        """Return a chain whose agents are all replaced by controllable Mocks."""
+        from src.chains.analysis_chain import FinancialAnalysisChain
+
+        mock_llm = _make_llm()
+        with patch.object(FinancialAnalysisChain, "_build_tools", return_value=[]), \
+             patch.object(FinancialAnalysisChain, "_init_agents"), \
+             patch.object(FinancialAnalysisChain, "_init_vector_store", return_value=None):
+            c = FinancialAnalysisChain(llm=mock_llm)
+
+        c.research_agent = Mock()
+        c.sentiment_agent = Mock()
+        c.risk_agent = Mock()
+        c.summary_agent = Mock()
+        c.vector_store = None
+
+        # Default success responses
+        c.research_agent.execute.return_value = {
+            "symbol": "AAPL", "findings": "Strong Q4.", "sources_used": [], "period_days": 7,
+        }
+        c.sentiment_agent.execute.return_value = {
+            "symbol": "AAPL", "overall_sentiment": "POSITIVE", "sentiment_score": 0.7,
+            "confidence": 0.8, "text_count": 1, "llm_analysis": {"analysis": "good"},
+        }
+        c.risk_agent.execute.return_value = {
+            "symbol": "AAPL", "overall_risk_score": 0.3, "risk_level": "LOW",
+            "identified_risks": [], "alerts": [], "recommendations": [],
+        }
+        c.summary_agent.execute.return_value = {
+            "symbol": "AAPL", "recommendation": "BUY", "executive_summary": "Looks good.",
+            "key_positives": [], "key_negatives": [], "action_items": [],
+            "scores": {"sentiment_score": 0.7, "risk_score": 0.3,
+                       "composite_score": 0.7, "confidence": 0.8, "confidence_label": "HIGH"},
+            "confidence": 0.8, "confidence_label": "HIGH",
+            "analysis_date": "2024-01-01T00:00:00", "period_days": 7,
+            "full_report": "", "metadata": {},
+        }
+        return c
+
+    def _make_agent_error(self, agent_name: str) -> AgentExecutionError:
+        return AgentExecutionError(
+            agent_name=agent_name,
+            original_error=RuntimeError("network error"),
+            input_data={"symbol": "AAPL"},
+        )
+
+    # -- fail_fast=False (default) ------------------------------------------
+
+    def test_research_failure_continues_pipeline(self, chain):
+        """Research failure with fail_fast=False: downstream agents still run."""
+        chain.research_agent.execute.side_effect = self._make_agent_error("ResearchAgent")
+        result = chain.analyze_stock("AAPL")
+        chain.sentiment_agent.execute.assert_called_once()
+        chain.risk_agent.execute.assert_called_once()
+        chain.summary_agent.execute.assert_called_once()
+        assert result["recommendation"] == "BUY"
+
+    def test_sentiment_failure_continues_pipeline(self, chain):
+        """Sentiment failure with fail_fast=False: risk and summary still run."""
+        chain.sentiment_agent.execute.side_effect = self._make_agent_error("SentimentAgent")
+        result = chain.analyze_stock("AAPL")
+        chain.risk_agent.execute.assert_called_once()
+        chain.summary_agent.execute.assert_called_once()
+        assert result["recommendation"] == "BUY"
+
+    def test_risk_failure_continues_pipeline(self, chain):
+        """Risk failure with fail_fast=False: summary still runs."""
+        chain.risk_agent.execute.side_effect = self._make_agent_error("RiskAgent")
+        result = chain.analyze_stock("AAPL")
+        chain.summary_agent.execute.assert_called_once()
+        assert result["recommendation"] == "BUY"
+
+    def test_summary_failure_always_returns_error(self, chain):
+        """Summary failure is always surfaced regardless of fail_fast."""
+        chain.summary_agent.execute.side_effect = self._make_agent_error("SummaryAgent")
+        result = chain.analyze_stock("AAPL", fail_fast=False)
+        assert result["status"] == "failed"
+        assert result["failed_stage"] == "summary"
+
+    # -- fail_fast=True -------------------------------------------------------
+
+    def test_research_failure_halts_on_fail_fast(self, chain):
+        """Research failure with fail_fast=True: pipeline halts, returns error dict."""
+        chain.research_agent.execute.side_effect = self._make_agent_error("ResearchAgent")
+        result = chain.analyze_stock("AAPL", fail_fast=True)
+        assert result["status"] == "failed"
+        assert result["symbol"] == "AAPL"
+        assert result["failed_stage"] == "research"
+        assert "error" in result
+        chain.sentiment_agent.execute.assert_not_called()
+        chain.risk_agent.execute.assert_not_called()
+        chain.summary_agent.execute.assert_not_called()
+
+    def test_sentiment_failure_halts_on_fail_fast(self, chain):
+        """Sentiment failure with fail_fast=True stops before risk and summary."""
+        chain.sentiment_agent.execute.side_effect = self._make_agent_error("SentimentAgent")
+        result = chain.analyze_stock("AAPL", fail_fast=True)
+        assert result["status"] == "failed"
+        assert result["failed_stage"] == "sentiment"
+        chain.risk_agent.execute.assert_not_called()
+        chain.summary_agent.execute.assert_not_called()
+
+    def test_error_response_contains_agent_message(self, chain):
+        """The error string in the top-level response names the failing agent."""
+        chain.research_agent.execute.side_effect = self._make_agent_error("ResearchAgent")
+        result = chain.analyze_stock("AAPL", fail_fast=True)
+        assert "ResearchAgent" in result["error"]
+
+    # -- AgentExecutionError contract -----------------------------------------
+
+    def test_agent_execution_error_str(self):
+        """AgentExecutionError str() includes agent name and original error type."""
+        exc = AgentExecutionError(
+            agent_name="ResearchAgent",
+            original_error=ValueError("bad input"),
+            input_data={"symbol": "X"},
+        )
+        assert "ResearchAgent" in str(exc)
+        assert "ValueError" in str(exc)
+        assert exc.agent_name == "ResearchAgent"
+        assert isinstance(exc.original_error, ValueError)
+
+
+# ===========================================================================
+# FinancialAnalysisChain — async parallel execution tests
+# ===========================================================================
+
+class TestFinancialAnalysisChainAsync:
+    """Verify that analyze_stock_async() dispatches Sentiment + Risk in parallel."""
+
+    @pytest.fixture
+    def async_chain(self):
+        """Chain with AsyncMock aexecute() on every agent."""
+        from src.chains.analysis_chain import FinancialAnalysisChain
+        from unittest.mock import AsyncMock
+
+        mock_llm = _make_llm()
+        with patch.object(FinancialAnalysisChain, "_build_tools", return_value=[]), \
+             patch.object(FinancialAnalysisChain, "_init_agents"), \
+             patch.object(FinancialAnalysisChain, "_init_vector_store", return_value=None):
+            c = FinancialAnalysisChain(llm=mock_llm)
+
+        c.research_agent = Mock()
+        c.sentiment_agent = Mock()
+        c.risk_agent = Mock()
+        c.summary_agent = Mock()
+        c.vector_store = None
+
+        c.research_agent.aexecute = AsyncMock(return_value={
+            "symbol": "AAPL", "findings": "Strong Q4.", "sources_used": [], "period_days": 7,
+        })
+        c.sentiment_agent.aexecute = AsyncMock(return_value={
+            "symbol": "AAPL", "overall_sentiment": "POSITIVE", "sentiment_score": 0.7,
+            "confidence": 0.8, "text_count": 1, "llm_analysis": {"analysis": "good"},
+        })
+        c.risk_agent.aexecute = AsyncMock(return_value={
+            "symbol": "AAPL", "overall_risk_score": 0.3, "risk_level": "LOW",
+            "identified_risks": [], "alerts": [], "recommendations": [],
+        })
+        c.summary_agent.aexecute = AsyncMock(return_value={
+            "symbol": "AAPL", "recommendation": "BUY", "executive_summary": "Looks good.",
+            "key_positives": [], "key_negatives": [], "action_items": [],
+            "scores": {
+                "sentiment_score": 0.7, "risk_score": 0.3,
+                "composite_score": 0.7, "confidence": 0.8, "confidence_label": "HIGH",
+            },
+            "confidence": 0.8, "confidence_label": "HIGH",
+            "analysis_date": "2024-01-01T00:00:00", "period_days": 7,
+            "full_report": "", "metadata": {},
+        })
+        return c
+
+    async def test_sentiment_and_risk_dispatched_via_gather(self, async_chain):
+        """asyncio.gather is called with exactly 2 coroutines for Sentiment + Risk."""
+        import asyncio as _asyncio
+
+        real_gather = _asyncio.gather
+        gather_arg_counts: list = []
+
+        async def spy_gather(*coros, **kw):
+            gather_arg_counts.append(len(coros))
+            return await real_gather(*coros, **kw)
+
+        with patch("asyncio.gather", side_effect=spy_gather):
+            result = await async_chain.analyze_stock_async("AAPL")
+
+        # gather must have been called exactly once with the 2 parallel coroutines
+        assert gather_arg_counts == [2], (
+            "Expected asyncio.gather called once with 2 coroutines "
+            f"(sentiment + risk); got {gather_arg_counts}"
+        )
+        assert result["recommendation"] == "BUY"
+
+    async def test_research_completes_before_parallel_stages(self, async_chain):
+        """ResearchAgent.aexecute finishes before SentimentAgent and RiskAgent start."""
+        import asyncio as _asyncio
+        call_log: list = []
+
+        orig_research = async_chain.research_agent.aexecute
+        orig_sentiment = async_chain.sentiment_agent.aexecute
+
+        async def log_research(data):
+            call_log.append("research_start")
+            result = await orig_research(data)
+            call_log.append("research_end")
+            return result
+
+        async def log_sentiment(data):
+            call_log.append("sentiment_start")
+            return await orig_sentiment(data)
+
+        async_chain.research_agent.aexecute = log_research
+        async_chain.sentiment_agent.aexecute = log_sentiment
+
+        await async_chain.analyze_stock_async("AAPL")
+
+        assert "research_end" in call_log
+        assert "sentiment_start" in call_log
+        assert call_log.index("research_end") < call_log.index("sentiment_start")
+
+    async def test_elapsed_seconds_present_and_non_negative(self, async_chain):
+        """Result dict includes _elapsed_seconds as a non-negative float."""
+        result = await async_chain.analyze_stock_async("AAPL")
+        assert "_elapsed_seconds" in result
+        assert isinstance(result["_elapsed_seconds"], float)
+        assert result["_elapsed_seconds"] >= 0.0
+
+    def test_sync_wrapper_delegates_to_async(self, async_chain):
+        """analyze_stock() calls analyze_stock_async() and returns its result."""
+        from unittest.mock import AsyncMock
+
+        expected = {
+            "symbol": "AAPL", "recommendation": "HOLD", "_elapsed_seconds": 0.5,
+        }
+        with patch.object(
+            async_chain, "analyze_stock_async", new_callable=AsyncMock, return_value=expected
+        ) as mock_async:
+            result = async_chain.analyze_stock("AAPL", days_back=3)
+
+        mock_async.assert_called_once_with(
+            symbol="AAPL",
+            days_back=3,
+            focus_areas="earnings, product launches, regulatory issues, market sentiment",
+            include_sentiment=True,
+            include_risk=True,
+            context_from_vector_store=True,
+            fail_fast=False,
+        )
+        assert result["recommendation"] == "HOLD"
 
 
 # ===========================================================================

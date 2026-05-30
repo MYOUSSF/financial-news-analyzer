@@ -108,3 +108,4 @@ secrets/
 credentials/
 *.pem
 *.key
+CLAUDE.md

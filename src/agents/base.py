@@ -1,9 +1,32 @@
 """
 Base Agent class for all specialized agents in the system.
 """
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from loguru import logger
+
+
+class AgentExecutionError(Exception):
+    """
+    Raised when an agent's execute() method encounters an unrecoverable error.
+
+    Carries enough context for the chain to log a precise error and decide
+    whether to halt (fail_fast=True) or continue with an empty stage result.
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        original_error: Exception,
+        input_data: Dict[str, Any],
+    ):
+        self.agent_name = agent_name
+        self.original_error = original_error
+        self.input_data = input_data
+        super().__init__(
+            f"[{agent_name}] {type(original_error).__name__}: {original_error}"
+        )
 
 
 class BaseAgent(ABC):
@@ -59,6 +82,17 @@ class BaseAgent(ABC):
         Returns:
             Dictionary containing the agent's output.
         """
+
+    async def aexecute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Async version of execute(). Default runs execute() in a thread-pool
+        executor so it never blocks the event loop.
+
+        Subclasses with true async I/O (e.g. LLM ainvoke calls) should
+        override this for maximum concurrency benefit.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.execute, input_data)
 
     # ------------------------------------------------------------------
     # Memory management

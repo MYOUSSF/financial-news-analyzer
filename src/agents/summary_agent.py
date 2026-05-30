@@ -2,13 +2,26 @@
 Summary Agent — Synthesizes findings from Research, Sentiment, and Risk agents
 into a cohesive investment research report.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from datetime import datetime
 from loguru import logger
 
 from langchain_core.prompts import PromptTemplate
+from pydantic import BaseModel, Field
 
-from .base import BaseAgent
+from .base import AgentExecutionError, BaseAgent
+
+RECOMMENDATION_ORDER = ["STRONG BUY", "BUY", "HOLD", "SELL", "AVOID"]
+
+
+class SynthesisOutput(BaseModel):
+    executive_summary: str
+    key_positives: List[str] = Field(description="Up to 5 key positive factors")
+    key_negatives: List[str] = Field(description="Up to 5 key negative factors or risks")
+    recommendation: Literal["STRONG BUY", "BUY", "HOLD", "SELL", "AVOID"]
+    recommendation_rationale: str
+    confidence_label: Literal["LOW", "MEDIUM", "HIGH"]
+    action_items: List[str] = Field(description="Up to 3 immediate action items for the investor")
 
 
 class SummaryAgent(BaseAgent):
@@ -157,8 +170,8 @@ Be direct and informative. Do not use bullet points.
                 scores["sentiment_score"], scores["risk_score"]
             )
 
-            # Generate LLM synthesis
-            llm_output = self._synthesize_with_llm(
+            # Generate LLM synthesis with structured output
+            synthesis = self._synthesize_with_llm(
                 symbol=symbol,
                 analysis_date=analysis_date,
                 period_days=period_days,
@@ -167,34 +180,44 @@ Be direct and informative. Do not use bullet points.
                 risk=risk,
             )
 
-            # Parse LLM output into structured sections
-            parsed = self._parse_llm_output(llm_output)
+            parsed = synthesis.model_dump()
+            parsed["key_positives"] = parsed["key_positives"][:5]
+            parsed["key_negatives"] = parsed["key_negatives"][:5]
+            parsed["action_items"] = parsed["action_items"][:3]
 
-            # Prefer LLM recommendation if it disagrees; log discrepancy
-            final_recommendation = parsed.get("recommendation") or rule_recommendation
-            if parsed.get("recommendation") and parsed["recommendation"] != rule_recommendation:
-                logger.info(
-                    f"LLM recommendation ({parsed['recommendation']}) differs from "
-                    f"rule-based ({rule_recommendation}); using LLM recommendation."
+            # Cross-check: if LLM diverges from rules by more than one level, use rule-based
+            llm_recommendation = parsed["recommendation"]
+            rule_idx = RECOMMENDATION_ORDER.index(rule_recommendation)
+            llm_idx = RECOMMENDATION_ORDER.index(llm_recommendation)
+            if abs(llm_idx - rule_idx) > 1:
+                logger.warning(
+                    f"LLM recommendation ({llm_recommendation}) diverges from "
+                    f"rule-based ({rule_recommendation}) by more than one level; "
+                    f"using rule-based result."
                 )
+                final_recommendation = rule_recommendation
+            else:
+                if llm_recommendation != rule_recommendation:
+                    logger.info(
+                        f"LLM recommendation ({llm_recommendation}) differs from "
+                        f"rule-based ({rule_recommendation}); using LLM recommendation."
+                    )
+                final_recommendation = llm_recommendation
 
             output = {
                 "symbol": symbol,
                 "analysis_date": analysis_date,
                 "period_days": period_days,
-                # Core report content
-                "executive_summary": parsed.get("executive_summary", llm_output[:500]),
-                "key_positives": parsed.get("key_positives", []),
-                "key_negatives": parsed.get("key_negatives", []),
+                "executive_summary": parsed["executive_summary"],
+                "key_positives": parsed["key_positives"],
+                "key_negatives": parsed["key_negatives"],
                 "recommendation": final_recommendation,
-                "recommendation_rationale": parsed.get("recommendation_rationale", ""),
+                "recommendation_rationale": parsed["recommendation_rationale"],
                 "confidence": scores["confidence"],
-                "confidence_label": scores["confidence_label"],
-                "action_items": parsed.get("action_items", []),
-                # Numeric scores
+                "confidence_label": parsed["confidence_label"],
+                "action_items": parsed["action_items"],
                 "scores": scores,
-                # Full LLM text (useful for detailed views / report export)
-                "full_report": llm_output,
+                "full_report": self._render_full_report(parsed),
                 "metadata": {
                     "agent": self.name,
                     "rule_recommendation": rule_recommendation,
@@ -214,11 +237,11 @@ Be direct and informative. Do not use bullet points.
 
         except Exception as e:
             logger.error(f"Error in SummaryAgent.execute: {e}")
-            return {
-                "symbol": input_data.get("symbol", ""),
-                "error": str(e),
-                "status": "failed",
-            }
+            raise AgentExecutionError(
+                agent_name=self.name,
+                original_error=e,
+                input_data=input_data,
+            ) from e
 
     def generate_short_summary(
         self,
@@ -346,8 +369,8 @@ Be direct and informative. Do not use bullet points.
         research: Dict[str, Any],
         sentiment: Dict[str, Any],
         risk: Dict[str, Any],
-    ) -> str:
-        """Call the LLM with the full synthesis prompt."""
+    ) -> SynthesisOutput:
+        """Call the LLM and return a validated SynthesisOutput."""
         research_text = self._format_research(research)
         sentiment_text = self._format_sentiment(sentiment)
         risk_text = self._format_risk(risk)
@@ -362,99 +385,28 @@ Be direct and informative. Do not use bullet points.
         )
 
         try:
-            response = self.llm.invoke(prompt)
-            return response.content if hasattr(response, "content") else str(response)
+            structured_llm = self.llm.with_structured_output(SynthesisOutput)
+            return structured_llm.invoke(prompt)
         except Exception as e:
             logger.error(f"LLM synthesis failed: {e}")
-            return f"Synthesis unavailable due to LLM error: {e}"
+            raise
 
-    def _parse_llm_output(self, text: str) -> Dict[str, Any]:
-        """
-        Parse the free-form LLM output into structured fields.
-
-        This is a heuristic parser; works well when the LLM follows the
-        prompt template. Falls back gracefully when sections are missing.
-        """
-        result: Dict[str, Any] = {
-            "executive_summary": "",
-            "key_positives": [],
-            "key_negatives": [],
-            "recommendation": None,
-            "recommendation_rationale": "",
-            "confidence_label": "MEDIUM",
-            "action_items": [],
-        }
-
-        if not text:
-            return result
-
-        lines = text.splitlines()
-        current_section = None
-
-        for line in lines:
-            stripped = line.strip()
-            lower = stripped.lower()
-
-            # Detect section headers
-            if "executive summary" in lower:
-                current_section = "executive_summary"
-                continue
-            elif "key positive" in lower:
-                current_section = "key_positives"
-                continue
-            elif "key negative" in lower or "key risk" in lower:
-                current_section = "key_negatives"
-                continue
-            elif "recommendation" in lower and "rationale" not in lower:
-                current_section = "recommendation"
-                continue
-            elif "rationale" in lower:
-                current_section = "rationale"
-                continue
-            elif "confidence" in lower:
-                current_section = "confidence"
-                continue
-            elif "action item" in lower or "immediate action" in lower:
-                current_section = "action_items"
-                continue
-
-            # Skip empty lines
-            if not stripped:
-                continue
-
-            # Populate sections
-            if current_section == "executive_summary":
-                result["executive_summary"] += (" " if result["executive_summary"] else "") + stripped
-
-            elif current_section == "key_positives" and stripped.startswith(("-", "•", "*")):
-                result["key_positives"].append(stripped.lstrip("-•* "))
-
-            elif current_section == "key_negatives" and stripped.startswith(("-", "•", "*")):
-                result["key_negatives"].append(stripped.lstrip("-•* "))
-
-            elif current_section == "recommendation":
-                # Look for a recommendation keyword in the line
-                for rec in ["STRONG BUY", "BUY", "HOLD", "SELL", "AVOID"]:
-                    if rec in stripped.upper():
-                        result["recommendation"] = rec
-                        break
-                result["recommendation_rationale"] += (" " if result["recommendation_rationale"] else "") + stripped
-
-            elif current_section == "rationale":
-                result["recommendation_rationale"] += (" " if result["recommendation_rationale"] else "") + stripped
-
-            elif current_section == "confidence":
-                for level in ["HIGH", "MEDIUM", "LOW"]:
-                    if level in stripped.upper():
-                        result["confidence_label"] = level
-                        break
-
-            elif current_section == "action_items":
-                clean = stripped.lstrip("0123456789.-•* ")
-                if clean:
-                    result["action_items"].append(clean)
-
-        return result
+    def _render_full_report(self, parsed: Dict[str, Any]) -> str:
+        """Reconstruct a human-readable report string from a parsed SynthesisOutput dict."""
+        positives = "\n".join(f"- {p}" for p in parsed.get("key_positives", []))
+        negatives = "\n".join(f"- {n}" for n in parsed.get("key_negatives", []))
+        actions = "\n".join(
+            f"{i + 1}. {a}" for i, a in enumerate(parsed.get("action_items", []))
+        )
+        return (
+            f"EXECUTIVE SUMMARY\n{parsed.get('executive_summary', '')}\n\n"
+            f"KEY POSITIVES\n{positives}\n\n"
+            f"KEY NEGATIVES / RISKS\n{negatives}\n\n"
+            f"INVESTMENT RECOMMENDATION\n{parsed.get('recommendation', '')} — "
+            f"{parsed.get('recommendation_rationale', '')}\n\n"
+            f"CONFIDENCE LEVEL\n{parsed.get('confidence_label', '')}\n\n"
+            f"IMMEDIATE ACTION ITEMS\n{actions}"
+        )
 
     def _compute_composite_scores(
         self,

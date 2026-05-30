@@ -1,0 +1,23 @@
+# Minimal dependencies for running the test suite.
+# No torch, chromadb, or other heavy packages needed.
+#
+# Install with:
+#   pip install -r requirements-test.txt
+
+# Testing
+pytest
+pytest-cov
+pytest-mock
+pytest-asyncio
+
+# Core runtime deps the agents import at module level
+loguru
+numpy
+requests
+python-dotenv
+pydantic
+pydantic-settings
+
+# LangChain (agents import from langchain_core)
+langchain-core
+langchain

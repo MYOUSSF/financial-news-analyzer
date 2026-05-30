@@ -1,13 +1,15 @@
 """
 Risk Agent - Identifies and analyzes potential risks in financial markets.
 """
+import asyncio
+import re
 from typing import Any, Dict, List
 from datetime import datetime
 from loguru import logger
 
 from langchain_core.prompts import PromptTemplate
 
-from .base import BaseAgent
+from .base import AgentExecutionError, BaseAgent
 
 
 class RiskAgent(BaseAgent):
@@ -125,8 +127,8 @@ class RiskAgent(BaseAgent):
             response = self.llm.invoke(prompt)
             llm_analysis = response.content if hasattr(response, 'content') else str(response)
             
-            # Extract structured risks
-            risks = self._parse_risks(llm_analysis)
+            # Extract structured risks (scoped to the target company)
+            risks = self._parse_risks(llm_analysis, symbol)
             
             # Calculate overall risk score
             overall_risk = self._calculate_risk_score(risks, sentiment)
@@ -157,13 +159,70 @@ class RiskAgent(BaseAgent):
             return output
             
         except Exception as e:
-            logger.error(f"Error in RiskAgent execution: {str(e)}")
-            return {
-                "symbol": input_data.get("symbol", ""),
-                "error": str(e),
-                "status": "failed"
-            }
+            logger.error(f"Error in RiskAgent execution: {e}")
+            raise AgentExecutionError(
+                agent_name=self.name,
+                original_error=e,
+                input_data=input_data,
+            ) from e
     
+    async def aexecute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Async version of execute() with a true async LLM call (ainvoke).
+        All post-LLM processing is synchronous and cheap, so no executor is needed.
+        """
+        try:
+            symbol = input_data.get("symbol", "")
+            news_data = input_data.get("news_data", "No news data available")
+            market_data = input_data.get("market_data", "No market data available")
+            sentiment = input_data.get("sentiment", {})
+
+            logger.info(f"Analyzing risks for {symbol}")
+
+            prompt = self.risk_prompt.format(
+                symbol=symbol,
+                news_data=self._format_news(news_data),
+                market_data=self._format_market_data(market_data),
+                sentiment=self._format_sentiment(sentiment),
+            )
+
+            response = await self.llm.ainvoke(prompt)
+            llm_analysis = response.content if hasattr(response, "content") else str(response)
+
+            risks = self._parse_risks(llm_analysis, symbol)
+            overall_risk = self._calculate_risk_score(risks, sentiment)
+            alerts = self._generate_alerts(risks, overall_risk)
+
+            output = {
+                "symbol": symbol,
+                "analysis_date": datetime.now().isoformat(),
+                "overall_risk_score": overall_risk["score"],
+                "risk_level": overall_risk["level"],
+                "identified_risks": risks,
+                "alerts": alerts,
+                "recommendations": self._generate_recommendations(risks, overall_risk),
+                "llm_analysis": llm_analysis,
+                "metadata": {
+                    "agent": self.name,
+                    "risk_categories_checked": list(self.RISK_CATEGORIES.keys()),
+                },
+            }
+
+            self._log_execution(input_data, output)
+            logger.info(
+                f"Risk analysis complete for {symbol}: "
+                f"{overall_risk['level']} ({overall_risk['score']:.2f})"
+            )
+            return output
+
+        except Exception as e:
+            logger.error(f"Error in RiskAgent aexecute: {e}")
+            raise AgentExecutionError(
+                agent_name=self.name,
+                original_error=e,
+                input_data=input_data,
+            ) from e
+
     def _format_news(self, news_data: Any) -> str:
         """Format news data for prompt."""
         if isinstance(news_data, str):
@@ -196,38 +255,100 @@ class RiskAgent(BaseAgent):
         Confidence: {sentiment.get('confidence', 'N/A')}
         """
     
-    def _parse_risks(self, llm_analysis: str) -> List[Dict[str, Any]]:
+    def _extract_name_variants(self, symbol: str, analysis: str) -> List[str]:
         """
-        Parse risks from LLM analysis.
-        
-        This is a simplified parser. In production, use more sophisticated NLP.
+        Build a list of lowercase name variants for the target company.
+
+        Always includes the ticker symbol.  Also scans the first sentence of
+        the LLM analysis (where the target company is typically named) for
+        runs of 1-2 consecutive Title-Case words, which are likely to be the
+        company's full name (e.g. "Apple", "Goldman Sachs").  Only the first
+        sentence is used to avoid accidentally collecting competitor names that
+        appear later in the text.
         """
-        risks = []
-        
-        # Define risk keywords for each category
+        variants: List[str] = []
+        if symbol:
+            variants.append(symbol.lower())
+
+        # Extract the first sentence only
+        first_sentence = (
+            re.split(r"(?<=[.!?])\s", analysis.strip())[0]
+            if analysis.strip()
+            else ""
+        )
+        # Skip the very first word — it is always capitalised at sentence start.
+        rest = first_sentence[first_sentence.find(" ") + 1 :] if " " in first_sentence else ""
+
+        # Match 1-2 consecutive Title-Case words (proper nouns / company names).
+        for m in re.finditer(
+            r"\b([A-Z][a-zA-Z]{1,}(?:\s+[A-Z][a-zA-Z]+)?)\b", rest
+        ):
+            candidate = m.group(1).lower()
+            if candidate not in variants:
+                variants.append(candidate)
+
+        return variants
+
+    # Proximity window (characters on each side of the keyword) used to decide
+    # whether the risk is directly attributed to the target company.
+    _SCOPE_WINDOW = 150
+
+    def _parse_risks(self, llm_analysis: str, symbol: str = "") -> List[Dict[str, Any]]:
+        """
+        Parse risks from LLM analysis, scoping each match to the target company.
+
+        For every keyword hit, the method checks whether the target symbol or a
+        name variant appears within ±_SCOPE_WINDOW characters of the match
+        position in the text.
+
+        - If a name variant IS nearby  → scoped=True,  likelihood=0.6 (direct risk)
+        - If no name variant is nearby → scoped=False, likelihood=0.3 (possible
+          indirect / sector-level risk, e.g. a keyword about a named competitor)
+        """
         risk_keywords = {
             "regulatory": ["investigation", "lawsuit", "compliance", "regulation", "fine"],
             "financial": ["debt", "loss", "bankruptcy", "cash flow", "revenue decline"],
             "market": ["competition", "market share", "downturn", "sector decline"],
             "operational": ["supply chain", "management", "strike", "disruption"],
-            "volatility": ["volatile", "swing", "fluctuation", "unstable"]
+            "volatility": ["volatile", "swing", "fluctuation", "unstable"],
         }
-        
+
+        name_variants = self._extract_name_variants(symbol, llm_analysis)
         analysis_lower = llm_analysis.lower()
-        
+        risks: List[Dict[str, Any]] = []
+
         for category, keywords in risk_keywords.items():
             for keyword in keywords:
-                if keyword in analysis_lower:
-                    # Found a potential risk
-                    risks.append({
-                        "category": category,
-                        "description": f"Potential {category} risk: {keyword} detected",
-                        "severity": "MEDIUM",  # Default severity
-                        "likelihood": 0.6,
-                        "detected_keyword": keyword
-                    })
-                    break  # Only add one risk per category
-        
+                pos = analysis_lower.find(keyword)
+                if pos == -1:
+                    continue
+
+                # Determine whether the risk is directly tied to the target company
+                window_start = max(0, pos - self._SCOPE_WINDOW)
+                window_end = pos + len(keyword) + self._SCOPE_WINDOW
+                window = analysis_lower[window_start:window_end]
+                scoped = (
+                    any(variant in window for variant in name_variants)
+                    if name_variants
+                    else False
+                )
+
+                if not scoped:
+                    logger.debug(
+                        f"Keyword '{keyword}' ({category}) found outside proximity of "
+                        f"'{symbol}' — marking as indirect risk (likelihood=0.3)"
+                    )
+
+                risks.append({
+                    "category": category,
+                    "description": f"Potential {category} risk: {keyword} detected",
+                    "severity": "MEDIUM",
+                    "likelihood": 0.6 if scoped else 0.3,
+                    "detected_keyword": keyword,
+                    "scoped": scoped,
+                })
+                break  # One risk entry per category
+
         return risks
     
     def _calculate_risk_score(

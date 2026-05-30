@@ -12,11 +12,14 @@ Usage (Python SDK):
     print(result["recommendation"])
     print(result["executive_summary"])
 """
+import asyncio
 import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from loguru import logger
 from dotenv import load_dotenv
+
+from src.agents.base import AgentExecutionError
 
 load_dotenv()
 
@@ -127,9 +130,13 @@ class FinancialAnalysisChain:
         include_sentiment: bool = True,
         include_risk: bool = True,
         context_from_vector_store: bool = True,
+        fail_fast: bool = False,
     ) -> Dict[str, Any]:
         """
-        Run the complete analysis pipeline for a stock symbol.
+        Run the complete analysis pipeline for a stock symbol (synchronous wrapper).
+
+        Internally delegates to analyze_stock_async() via asyncio.run().
+        Call analyze_stock_async() directly from async contexts (FastAPI, etc.).
 
         Args:
             symbol: Stock ticker (e.g. "AAPL").
@@ -138,82 +145,166 @@ class FinancialAnalysisChain:
             include_sentiment: Run the SentimentAgent stage.
             include_risk: Run the RiskAgent stage.
             context_from_vector_store: Enrich research with similar historical events.
+            fail_fast: When True, halt on the first agent failure and return a
+                top-level error dict.  When False (default), log the failure,
+                substitute an empty dict for that stage, and continue.
 
         Returns:
             Dict with keys matching SummaryAgent.execute() output plus
             added convenience keys: symbol, summary, sentiment_score,
-            risk_factors, recommendation, confidence.
+            risk_factors, recommendation, confidence, _elapsed_seconds.
+            On fail_fast failure: {"symbol", "status": "failed", "error",
+            "failed_stage"}.
+        """
+        return asyncio.run(
+            self.analyze_stock_async(
+                symbol=symbol,
+                days_back=days_back,
+                focus_areas=focus_areas,
+                include_sentiment=include_sentiment,
+                include_risk=include_risk,
+                context_from_vector_store=context_from_vector_store,
+                fail_fast=fail_fast,
+            )
+        )
+
+    async def analyze_stock_async(
+        self,
+        symbol: str,
+        days_back: int = 7,
+        focus_areas: str = "earnings, product launches, regulatory issues, market sentiment",
+        include_sentiment: bool = True,
+        include_risk: bool = True,
+        context_from_vector_store: bool = True,
+        fail_fast: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Async version of analyze_stock().
+
+        Stages 2 (Sentiment) and 3 (Risk) run concurrently via asyncio.gather
+        after Stage 1 (Research) completes, roughly halving wall-clock time.
+
+        Note: RiskAgent receives an empty sentiment dict because it runs in
+        parallel with SentimentAgent and cannot depend on its output.
         """
         symbol = symbol.upper()
-        logger.info(f"Starting full pipeline for {symbol} (days_back={days_back})")
+        logger.info(f"Starting async pipeline for {symbol} (days_back={days_back})")
         pipeline_start = datetime.now()
 
         # ── Stage 1: Research ─────────────────────────────────────────────
         logger.info(f"[1/4] Research Agent — {symbol}")
-        research_result = self.research_agent.execute({
-            "symbol": symbol,
-            "days_back": days_back,
-            "focus_areas": focus_areas,
-        })
+        research_result: Dict[str, Any] = {}
+        try:
+            research_result = await self.research_agent.aexecute({
+                "symbol": symbol,
+                "days_back": days_back,
+                "focus_areas": focus_areas,
+            })
+        except AgentExecutionError as exc:
+            logger.error(f"ResearchAgent failed for {symbol}: {exc}")
+            if fail_fast:
+                return self._error_response(symbol, exc, "research")
+            # fail_fast=False: continue with empty research
 
-        # Optionally enrich with vector store historical context
-        if context_from_vector_store and self.vector_store:
+        if context_from_vector_store and self.vector_store and research_result:
             historical = self._fetch_historical_context(symbol, research_result)
             research_result["historical_context"] = historical
 
-        # ── Stage 2: Sentiment ────────────────────────────────────────────
-        sentiment_result: Dict[str, Any] = {}
-        if include_sentiment:
-            logger.info(f"[2/4] Sentiment Agent — {symbol}")
-            # Feed raw research findings as the text corpus
-            findings_text = research_result.get("findings", "")
-            sentiment_result = self.sentiment_agent.execute({
+        # ── Stages 2 + 3: Sentiment and Risk — parallel ───────────────────
+        logger.info(f"[2+3/4] Sentiment + Risk Agents — {symbol} (parallel)")
+
+        async def _noop() -> Dict[str, Any]:
+            return {}
+
+        findings_text = research_result.get("findings", "")
+        sentiment_coro = (
+            self.sentiment_agent.aexecute({
                 "symbol": symbol,
-                "text": findings_text if findings_text else f"General market news for {symbol}",
+                "text": findings_text or f"General market news for {symbol}",
                 "context": f"Financial analysis for {symbol}",
             })
+            if include_sentiment
+            else _noop()
+        )
+        risk_coro = (
+            self.risk_agent.aexecute({
+                "symbol": symbol,
+                "news_data": research_result,
+                "market_data": {},
+                # Sentiment runs in parallel — not available yet; risk adjusts on {}
+                "sentiment": {},
+            })
+            if include_risk
+            else _noop()
+        )
+
+        raw_sentiment, raw_risk = await asyncio.gather(
+            sentiment_coro, risk_coro, return_exceptions=True
+        )
+
+        sentiment_result: Dict[str, Any] = {}
+        if include_sentiment:
+            if isinstance(raw_sentiment, BaseException):
+                logger.error(f"SentimentAgent failed for {symbol}: {raw_sentiment}")
+                if fail_fast:
+                    exc = (
+                        raw_sentiment
+                        if isinstance(raw_sentiment, AgentExecutionError)
+                        else AgentExecutionError("SentimentAgent", raw_sentiment, {})
+                    )
+                    return self._error_response(symbol, exc, "sentiment")
+            else:
+                sentiment_result = raw_sentiment
         else:
             logger.info("[2/4] Sentiment Agent — skipped")
 
-        # ── Stage 3: Risk ─────────────────────────────────────────────────
         risk_result: Dict[str, Any] = {}
         if include_risk:
-            logger.info(f"[3/4] Risk Agent — {symbol}")
-            risk_result = self.risk_agent.execute({
-                "symbol": symbol,
-                "news_data": research_result,
-                "market_data": {},   # extend here with live market data from stock_tool
-                "sentiment": sentiment_result,
-            })
+            if isinstance(raw_risk, BaseException):
+                logger.error(f"RiskAgent failed for {symbol}: {raw_risk}")
+                if fail_fast:
+                    exc = (
+                        raw_risk
+                        if isinstance(raw_risk, AgentExecutionError)
+                        else AgentExecutionError("RiskAgent", raw_risk, {})
+                    )
+                    return self._error_response(symbol, exc, "risk")
+            else:
+                risk_result = raw_risk
         else:
             logger.info("[3/4] Risk Agent — skipped")
 
         # ── Stage 4: Summary ──────────────────────────────────────────────
         logger.info(f"[4/4] Summary Agent — {symbol}")
-        summary_result = self.summary_agent.execute({
-            "symbol": symbol,
-            "research": research_result,
-            "sentiment": sentiment_result,
-            "risk": risk_result,
-            "period_days": days_back,
-        })
+        try:
+            summary_result = await self.summary_agent.aexecute({
+                "symbol": symbol,
+                "research": research_result,
+                "sentiment": sentiment_result,
+                "risk": risk_result,
+                "period_days": days_back,
+            })
+        except AgentExecutionError as exc:
+            logger.error(f"SummaryAgent failed for {symbol}: {exc}")
+            return self._error_response(symbol, exc, "summary")
 
-        # Persist the summarized article to the vector store for future context
         if self.vector_store and "error" not in summary_result:
             self._persist_to_vector_store(symbol, summary_result)
 
         elapsed = (datetime.now() - pipeline_start).total_seconds()
-        logger.info(f"Pipeline complete for {symbol} in {elapsed:.1f}s — "
-                    f"Recommendation: {summary_result.get('recommendation', 'N/A')}")
+        logger.info(
+            f"Async pipeline complete for {symbol} in {elapsed:.1f}s — "
+            f"Recommendation: {summary_result.get('recommendation', 'N/A')}"
+        )
 
-        # ── Build convenience output ──────────────────────────────────────
         return {
             **summary_result,
-            # Convenience aliases used by the README SDK examples
             "summary": summary_result.get("executive_summary", ""),
             "sentiment_score": sentiment_result.get("sentiment_score", None),
-            "risk_factors": [r.get("description") for r in risk_result.get("identified_risks", [])],
-            # Raw agent outputs (for debugging / downstream use)
+            "risk_factors": [
+                r.get("description")
+                for r in risk_result.get("identified_risks", [])
+            ],
             "_research": research_result,
             "_sentiment": sentiment_result,
             "_risk": risk_result,
@@ -264,6 +355,18 @@ class FinancialAnalysisChain:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _error_response(
+        symbol: str, exc: AgentExecutionError, stage: str
+    ) -> Dict[str, Any]:
+        """Build a top-level error dict returned when fail_fast=True."""
+        return {
+            "symbol": symbol,
+            "status": "failed",
+            "failed_stage": stage,
+            "error": str(exc),
+        }
 
     def _build_tools(self, news_api_key: Optional[str] = None) -> List[Any]:
         """Instantiate and return all LangChain tools."""

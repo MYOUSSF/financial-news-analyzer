@@ -31,7 +31,7 @@ research_agent:
 # Sentiment Agent
 # -----------------------------------------------------------------------------
 sentiment_agent:
-  ml_model: distilbert-base-uncased-finetuned-sst-2-english
+  ml_model: ProsusAI/finbert
   ml_device: -1             # -1 = CPU, 0 = first GPU
   ml_max_length: 512        # Token limit for transformer model
   llm_article_limit: 5      # Max articles sent to LLM at once
