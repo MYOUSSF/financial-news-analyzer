@@ -188,6 +188,109 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    """Analyze a portfolio of holdings."""
+    from src.chains.analysis_chain import FinancialAnalysisChain
+
+    # Parse "AAPL:0.4,MSFT:0.3,GOOGL:0.3"
+    holdings = []
+    try:
+        for part in args.holdings.split(","):
+            symbol_str, weight_str = part.strip().split(":")
+            holdings.append({
+                "symbol": symbol_str.strip().upper(),
+                "weight": float(weight_str.strip()),
+            })
+    except ValueError:
+        print("❌  Invalid format. Use: --holdings AAPL:0.4,MSFT:0.3,GOOGL:0.3")
+        return 1
+
+    total = sum(h["weight"] for h in holdings)
+    if abs(total - 1.0) > 0.05:
+        print(f"⚠️  Weights sum to {total:.2f} (expected 1.0)")
+
+    names = ", ".join(h["symbol"] for h in holdings)
+    print(f"\n📊 Analyzing portfolio: {names}\n")
+
+    try:
+        chain = FinancialAnalysisChain(verbose=args.verbose)
+        result = chain.analyze_portfolio(holdings=holdings, days_back=args.days)
+    except EnvironmentError as e:
+        print(f"❌  {e}")
+        return 1
+
+    if "error" in result:
+        print(f"❌  Portfolio analysis failed: {result['error']}")
+        return 1
+
+    _print_header(f"Portfolio Analysis — {datetime.now().strftime('%Y-%m-%d')}")
+    print(f"  Recommendation  : {result['portfolio_recommendation']}")
+    print(f"  Confidence      : {result['portfolio_confidence']}")
+    print(f"  Sentiment Score : {result['portfolio_sentiment_score']:.2f}")
+    print(f"  Risk Score      : {result['portfolio_risk_score']:.2f}")
+    print(f"  Composite Score : {result['portfolio_composite_score']:.2f}")
+
+    if result.get("concentration_risks"):
+        print("\n  ⚠️  Concentration Risks (weight > 25%):")
+        for cr in result["concentration_risks"]:
+            print(f"     • {cr['symbol']}: {cr['weight']:.0%}")
+
+    if result.get("correlated_risks"):
+        print("\n  🔗 Correlated Risks (shared across > 2 holdings):")
+        for cr in result["correlated_risks"]:
+            print(f"     • {cr['category'].title()}: {', '.join(cr['symbols'])}")
+
+    print(f"\n  {'Symbol':<8} {'Weight':>8} {'Rec':<16} {'Sentiment':>10} {'Risk':>8}")
+    print("  " + "─" * 55)
+    for h in result.get("holdings_table", []):
+        print(
+            f"  {h['symbol']:<8} {h['weight']:>7.0%} "
+            f"{h['recommendation']:<16} "
+            f"{h['sentiment_score']:>10.2f} "
+            f"{h['risk_score']:>8.2f}"
+        )
+
+    if result.get("executive_summary"):
+        print(f"\n  Summary:\n  {result['executive_summary']}")
+
+    return 0
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    """Evaluate pending recommendations and/or display backtest accuracy metrics."""
+    from src.backtesting.evaluator import BacktestEvaluator
+    from src.backtesting.report import generate_backtest_report
+
+    evaluator = BacktestEvaluator()
+
+    if args.evaluate:
+        print(f"\n⚙️  Evaluating pending recommendations (min age: {args.days_elapsed}d)…\n")
+        results = evaluator.run_all_pending(days_elapsed=args.days_elapsed)
+        evaluated = [r for r in results if "error" not in r]
+        errors = [r for r in results if "error" in r]
+        print(f"  ✅ Evaluated: {len(evaluated)}")
+        if errors:
+            print(f"  ❌ Errors   : {len(errors)}")
+            for e in errors:
+                print(f"     #{e['id']}: {e['error']}")
+
+    if args.report:
+        metrics = evaluator.compute_metrics()
+        report = generate_backtest_report(metrics)
+        if args.output:
+            from pathlib import Path
+            Path(args.output).write_text(report, encoding="utf-8")
+            print(f"\n✅  Report saved to: {args.output}")
+        else:
+            print(report)
+
+    if not args.evaluate and not args.report:
+        print("  Specify --evaluate and/or --report.  Run with --help for details.")
+        return 1
+
+    return 0
+
+
 def cmd_init_db(args: argparse.Namespace) -> int:
     """Initialize (or reset) the ChromaDB vector store."""
     from src.utils.init_db import init_database
@@ -243,6 +346,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p_initdb.add_argument("--reset", action="store_true", help="Wipe existing data before init")
     p_initdb.add_argument("--no-seed", action="store_true", help="Skip seed articles")
 
+    # ── portfolio ────────────────────────────────────────────────────────────
+    p_portfolio = sub.add_parser(
+        "portfolio", help="Analyze a portfolio of weighted holdings"
+    )
+    p_portfolio.add_argument(
+        "--holdings", required=True,
+        help="Comma-separated SYMBOL:WEIGHT pairs, e.g. AAPL:0.4,MSFT:0.3,GOOGL:0.3",
+    )
+    p_portfolio.add_argument("--days", "-d", type=int, default=7)
+
+    # ── backtest ─────────────────────────────────────────────────────────────
+    p_backtest = sub.add_parser(
+        "backtest", help="Evaluate recommendation accuracy against actual price moves"
+    )
+    p_backtest.add_argument(
+        "--evaluate", action="store_true",
+        help="Evaluate pending recommendations via yfinance",
+    )
+    p_backtest.add_argument(
+        "--report", action="store_true",
+        help="Print Markdown accuracy report",
+    )
+    p_backtest.add_argument(
+        "--days-elapsed", type=int, default=7, metavar="N",
+        help="Minimum age in days before evaluating a recommendation (default: 7)",
+    )
+    p_backtest.add_argument(
+        "--output", "-o", help="Save report to file instead of printing to stdout",
+    )
+
     return parser
 
 
@@ -274,6 +407,8 @@ def main() -> None:
         "monitor": cmd_monitor,
         "search": cmd_search,
         "init-db": cmd_init_db,
+        "portfolio": cmd_portfolio,
+        "backtest": cmd_backtest,
     }
 
     handler = dispatch.get(args.command)

@@ -4,6 +4,7 @@ from .research_agent import ResearchAgent
 from .sentiment_agent import SentimentAgent
 from .risk_agent import RiskAgent
 from .summary_agent import SummaryAgent
+from .portfolio_agent import PortfolioAgent
 
 __all__ = [
     "AgentExecutionError",
@@ -12,4 +13,5 @@ __all__ = [
     "SentimentAgent",
     "RiskAgent",
     "SummaryAgent",
+    "PortfolioAgent",
 ]

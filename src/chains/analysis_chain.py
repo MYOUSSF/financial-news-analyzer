@@ -199,6 +199,7 @@ class FinancialAnalysisChain:
         include_risk: bool = True,
         context_from_vector_store: bool = True,
         fail_fast: bool = False,
+        record_for_backtest: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the complete analysis pipeline for a stock symbol (synchronous wrapper).
@@ -216,6 +217,9 @@ class FinancialAnalysisChain:
             fail_fast: When True, halt on the first agent failure and return a
                 top-level error dict.  When False (default), log the failure,
                 substitute an empty dict for that stage, and continue.
+            record_for_backtest: When True, persist the recommendation to the
+                SQLite backtesting database after a successful pipeline run.
+                Defaults to False to avoid unintended writes.
 
         Returns:
             Dict with keys matching SummaryAgent.execute() output plus
@@ -233,6 +237,7 @@ class FinancialAnalysisChain:
                 include_risk=include_risk,
                 context_from_vector_store=context_from_vector_store,
                 fail_fast=fail_fast,
+                record_for_backtest=record_for_backtest,
             )
         )
 
@@ -245,6 +250,7 @@ class FinancialAnalysisChain:
         include_risk: bool = True,
         context_from_vector_store: bool = True,
         fail_fast: bool = False,
+        record_for_backtest: bool = False,
     ) -> Dict[str, Any]:
         """
         Async version of analyze_stock().
@@ -396,7 +402,64 @@ class FinancialAnalysisChain:
             self.cache.set(cache_key, result, ttl_seconds=self._cache_ttl_seconds)
             logger.debug(f"Cached analysis for {symbol} (TTL={self._cache_ttl_seconds}s)")
 
+        # ── Backtest recording (opt-in) ───────────────────────────────────
+        if record_for_backtest and "status" not in result:
+            try:
+                from src.backtesting.recorder import RecommendationRecorder
+                RecommendationRecorder().save(
+                    symbol=symbol,
+                    recommendation=result.get("recommendation", "HOLD"),
+                    confidence=result.get("confidence", 0.0),
+                    scores=result.get("scores", {}),
+                )
+            except Exception as exc:
+                logger.warning(f"Backtest recording failed for {symbol}: {exc}")
+
         return result
+
+    def analyze_portfolio(
+        self,
+        holdings: List[Dict[str, Any]],
+        days_back: int = 7,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Analyze a portfolio of holdings and return a portfolio-level report.
+
+        Runs ``analyze_stock()`` for each holding, then passes all results to
+        ``PortfolioAgent`` which aggregates scores, flags concentration and
+        correlated risks, and produces a portfolio recommendation.
+
+        Args:
+            holdings: List of ``{"symbol": str, "weight": float}`` dicts.
+                      Weights should sum to 1.0.
+            days_back: Look-back window passed to each stock analysis.
+            **kwargs: Additional keyword args forwarded to ``analyze_stock()``.
+
+        Returns:
+            Portfolio report dict from ``PortfolioAgent.execute()``.
+        """
+        from src.agents.portfolio_agent import PortfolioAgent
+
+        individual_analyses: Dict[str, Any] = {}
+        for holding in holdings:
+            symbol = holding["symbol"].upper()
+            try:
+                result = self.analyze_stock(symbol=symbol, days_back=days_back, **kwargs)
+                individual_analyses[symbol] = result
+            except Exception as exc:
+                logger.error(f"Portfolio: analysis failed for {symbol}: {exc}")
+                individual_analyses[symbol] = {
+                    "symbol": symbol,
+                    "error": str(exc),
+                    "status": "failed",
+                }
+
+        portfolio_agent = PortfolioAgent(llm=self.llm, verbose=self.verbose)
+        return portfolio_agent.execute({
+            "holdings": holdings,
+            "individual_analyses": individual_analyses,
+        })
 
     def batch_analyze(
         self,
