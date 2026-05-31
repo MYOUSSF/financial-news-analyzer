@@ -1,375 +1,554 @@
 #!/usr/bin/env python
 """
-Financial News Analyzer - Quick Demo Script
+Financial News Analyzer — Interactive Demo
 
-This script demonstrates the core functionality of the system.
-Run this to see the agents in action!
+Usage:
+    python demo.py               # defaults to AAPL
+    python demo.py --symbol TSLA # pre-fills the symbol
 """
+import argparse
 import os
 import sys
+import textwrap
 from datetime import datetime
+from typing import Any, Dict, Optional
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-print("=" * 80)
-print("🚀 Financial News Analyzer - Interactive Demo")
-print("=" * 80)
-print()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-def print_section(title):
-    """Print a formatted section header."""
-    print("\n" + "─" * 80)
-    print(f"📋 {title}")
-    print("─" * 80 + "\n")
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM detection (mirrors _build_llm priority order in analysis_chain.py)
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-def demo_research_agent():
-    """Demonstrate the Research Agent."""
-    print_section("Research Agent Demo")
-    
-    print("The Research Agent gathers information from multiple sources.")
-    print("It can fetch news, stock data, and economic indicators.\n")
-    
-    # Mock demonstration
-    symbol = "AAPL"
-    print(f"🔍 Researching: {symbol}")
-    print(f"📅 Period: Last 7 days")
-    print(f"⏳ Fetching data...\n")
-    
-    # Simulated results
-    print("✅ Research Complete!")
-    print("\nFindings:")
-    print("  • Found 47 news articles")
-    print("  • Stock up 2.3% over period")
-    print("  • Major events: Q4 earnings beat, new product launch")
-    print("  • Analyst upgrades: 3 firms raised price targets")
-    print("  • Trading volume: Above average (+15%)")
+def _detect_llm() -> tuple:
+    """Return (is_configured: bool, provider_name: str)."""
+    if os.getenv("OPENAI_API_KEY"):
+        return True, "OpenAI"
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return True, "Anthropic"
+    if os.getenv("OLLAMA_BASE_URL"):
+        return True, "Ollama"
+    return False, "none"
 
 
-def demo_sentiment_agent():
-    """Demonstrate the Sentiment Agent."""
-    print_section("Sentiment Agent Demo")
-    
-    print("The Sentiment Agent analyzes market sentiment using:")
-    print("  • Machine Learning models (DistilBERT)")
-    print("  • LLM reasoning (GPT-4)")
-    print("  • Historical context\n")
-    
-    print("🔍 Analyzing sentiment for AAPL...")
-    print("⏳ Processing 47 articles...\n")
-    
-    # Simulated results
-    print("✅ Sentiment Analysis Complete!")
-    print("\nResults:")
-    print("  📊 Overall Sentiment: POSITIVE")
-    print("  💯 Sentiment Score: 0.75 (75%)")
-    print("  🎯 Confidence: 85%")
-    print("\n  Positive Factors:")
-    print("    • Strong Q4 earnings performance")
-    print("    • Positive analyst ratings and upgrades")
-    print("    • New product launches well-received")
-    print("\n  Negative Factors:")
-    print("    • Regulatory concerns in EU markets")
-    print("    • Competitive pressure in key segments")
+_LLM_CONFIGURED, _LLM_PROVIDER = _detect_llm()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardcoded mock data (used by DemoChain when no LLM is configured)
+# ─────────────────────────────────────────────────────────────────────────────
 
-def demo_risk_agent():
-    """Demonstrate the Risk Agent."""
-    print_section("Risk Agent Demo")
-    
-    print("The Risk Agent identifies and assesses various risk categories:")
-    print("  • Regulatory risks")
-    print("  • Financial risks")
-    print("  • Market risks")
-    print("  • Operational risks")
-    print("  • Volatility risks\n")
-    
-    print("🔍 Assessing risks for AAPL...")
-    print("⏳ Analyzing data...\n")
-    
-    # Simulated results
-    print("✅ Risk Assessment Complete!")
-    print("\nOverall Risk Level: MEDIUM (55%)")
-    print("\nIdentified Risks:")
-    print("\n  ⚠️  HIGH - Volatility Risk (75% likelihood)")
-    print("      → Increased price volatility in recent trading")
-    print("      → Recommendation: Consider hedging strategies")
-    
-    print("\n  ⚠️  MEDIUM - Regulatory Risk (60% likelihood)")
-    print("      → Ongoing investigations in EU markets")
-    print("      → Recommendation: Monitor developments closely")
-    
-    print("\n  ⚠️  MEDIUM - Financial Risk (55% likelihood)")
-    print("      → Elevated debt levels vs. industry average")
-    print("      → Recommendation: Review financial statements")
-    
-    print("\n  ✅ LOW - Operational Risk (35% likelihood)")
-    print("      → Minor supply chain concerns")
-    print("      → Recommendation: Continue monitoring")
-
-
-def demo_complete_analysis():
-    """Demonstrate a complete multi-agent analysis."""
-    print_section("Complete Multi-Agent Analysis")
-    
-    print("This demonstrates the full analysis pipeline:")
-    print("Research → Sentiment → Risk → Summary\n")
-    
-    symbol = "AAPL"
-    print(f"🎯 Target: {symbol}")
-    print(f"📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"⏱️  Analysis Period: 7 days\n")
-    
-    print("🔄 Running multi-agent analysis...\n")
-    
-    stages = [
-        ("Research Agent", "Gathering news and market data"),
-        ("Sentiment Agent", "Analyzing market sentiment"),
-        ("Risk Agent", "Identifying risk factors"),
-        ("Summary Agent", "Synthesizing findings")
-    ]
-    
-    for agent, task in stages:
-        print(f"  ▶️  {agent}: {task}...")
-        import time
-        time.sleep(0.5)
-        print(f"  ✅ {agent}: Complete")
-    
-    print("\n" + "=" * 80)
-    print("📄 INVESTMENT RESEARCH REPORT")
-    print("=" * 80)
-    
-    report = f"""
-Symbol: {symbol}
-Analysis Date: {datetime.now().strftime('%Y-%m-%d')}
-Period: 7 days
-
-EXECUTIVE SUMMARY
-─────────────────
-Overall Assessment: POSITIVE with MODERATE RISK
-Recommendation: HOLD with positive long-term outlook
-Confidence Level: 85%
-
-KEY FINDINGS
-────────────
-News Coverage: 47 articles analyzed
-  • Predominantly positive coverage (68%)
-  • Major focus on earnings and product launches
-  • Some regulatory concerns noted
-
-Sentiment Analysis:
-  • Overall Sentiment: POSITIVE (75%)
-  • Confidence: 85%
-  • Trend: Improving over past week
-
-Risk Assessment:
-  • Overall Risk Level: MEDIUM (55%)
-  • Primary Concern: Volatility (HIGH)
-  • Secondary Concerns: Regulatory (MEDIUM), Financial (MEDIUM)
-
-DETAILED ANALYSIS
-─────────────────
-Recent Performance:
-  • Stock up 2.3% over analysis period
-  • Trading volume above average (+15%)
-  • Q4 earnings beat analyst expectations
-
-Positive Catalysts:
-  ✅ Strong earnings performance
-  ✅ Product innovation and launches
-  ✅ Analyst upgrades and positive ratings
-  ✅ Institutional buying activity
-
-Risk Factors:
-  ⚠️  Increased market volatility
-  ⚠️  Regulatory scrutiny in EU
-  ⚠️  Elevated debt levels
-  ⚠️  Competitive market pressures
-
-INVESTMENT RECOMMENDATION
-─────────────────────────
-Action: HOLD
-Rationale: Current risk/reward profile supports maintaining positions.
-          Strong fundamentals offset by moderate risk factors.
-
-Risk Management:
-  • Monitor volatility and consider hedging
-  • Stay informed on regulatory developments
-  • Review position sizing given current risk levels
-  • Set stop-loss orders to limit downside
-
-Price Targets:
-  • Bull Case: Continued earnings growth and positive sentiment
-  • Base Case: Stable performance with moderate volatility
-  • Bear Case: Regulatory headwinds and market correction
-
-─────────────────────────────────────────────────────────────
-This report was generated by Financial News Analyzer AI System
-Powered by LangChain Multi-Agent Architecture
-"""
-    
-    print(report)
-
-
-def demo_api_usage():
-    """Demonstrate API usage."""
-    print_section("REST API Demo")
-    
-    print("The system provides a comprehensive REST API for programmatic access.\n")
-    
-    print("Available Endpoints:")
-    print("\n📊 Analysis Endpoints:")
-    print("  POST /api/analyze              - Complete stock analysis")
-    print("  GET  /api/stocks/{symbol}/news - Get recent news")
-    print("  POST /api/sentiment/analyze    - Sentiment analysis")
-    print("  POST /api/risks/detect         - Risk assessment")
-    
-    print("\n🔍 Search Endpoints:")
-    print("  POST /api/search/semantic      - Semantic search")
-    print("  GET  /api/symbols/trending     - Trending symbols")
-    
-    print("\n📑 Reports:")
-    print("  POST /api/reports/generate     - Generate report")
-    
-    print("\n💡 System:")
-    print("  GET  /health                   - Health check")
-    print("  GET  /api/stats                - System statistics")
-    
-    print("\n" + "─" * 40)
-    print("Example API Call:")
-    print("─" * 40)
-    
-    api_example = """
-import requests
-
-response = requests.post(
-    "http://localhost:8000/api/analyze",
-    json={
-        "symbol": "AAPL",
-        "days_back": 7,
-        "include_sentiment": True,
-        "include_risk": True
-    }
+_SAMPLE_TEXT = (
+    "Apple reported Q4 earnings with EPS of $1.46, beating the $1.39 consensus. "
+    "Revenue grew 2% YoY to $89.5B. The Services segment hit a record $23.2B. "
+    "Three analyst firms raised price targets following the earnings beat. "
+    "Institutional buyers increased positions. An ongoing EU App Store antitrust "
+    "investigation remains a regulatory risk. Trading volume ran 15% above the "
+    "30-day average in the sessions after the earnings release."
 )
 
-result = response.json()
-print(f"Sentiment: {result['sentiment']['overall_sentiment']}")
-print(f"Risk Level: {result['risk']['risk_level']}")
-"""
-    print(api_example)
+_MOCK_RESEARCH: Dict[str, Any] = {
+    "findings": _SAMPLE_TEXT,
+    "sources_used": ["NewsTool", "StockTool"],
+    "period_days": 7,
+    "research_date": datetime.now().isoformat(),
+}
+
+_MOCK_SENTIMENT: Dict[str, Any] = {
+    "overall_sentiment": "POSITIVE",
+    "sentiment_score": 0.72,
+    "confidence": 0.84,
+    "text_count": 12,
+    "dedup_count": 3,
+    "key_insights": {
+        "positive_factors": [
+            "Strong Q4 earnings beat estimates",
+            "Services revenue at record levels",
+            "Institutional buying activity",
+        ],
+        "negative_factors": [
+            "EU regulatory investigations ongoing",
+            "Competitive pressure in smartphone segment",
+        ],
+        "market_implications": ["Momentum likely to continue short-term"],
+    },
+}
+
+_MOCK_RISK: Dict[str, Any] = {
+    "overall_risk_score": 0.42,
+    "risk_level": "MEDIUM",
+    "identified_risks": [
+        {
+            "category": "regulatory",
+            "description": "EU antitrust investigation into App Store practices",
+            "severity": "MEDIUM",
+            "likelihood": 0.6,
+        },
+        {
+            "category": "market",
+            "description": "Increased competition in key smartphone markets",
+            "severity": "LOW",
+            "likelihood": 0.5,
+        },
+        {
+            "category": "volatility",
+            "description": "Price swings around earnings season",
+            "severity": "MEDIUM",
+            "likelihood": 0.55,
+        },
+    ],
+    "alerts": [],
+    "recommendations": [
+        "Monitor EU regulatory developments closely",
+        "Consider hedging strategies given elevated volatility",
+    ],
+}
+
+_MOCK_SUMMARY: Dict[str, Any] = {
+    "analysis_date": datetime.now().isoformat(),
+    "period_days": 7,
+    "executive_summary": (
+        "Apple reported strong Q4 earnings with beats across revenue and EPS, "
+        "driven by record Services performance. Market sentiment is broadly "
+        "positive with analyst upgrades supporting a constructive outlook. "
+        "Moderate regulatory and volatility risk are the primary concerns."
+    ),
+    "key_positives": [
+        "Q4 EPS beat consensus by 5%",
+        "Services revenue at record $23.2B",
+        "Three analyst price target upgrades",
+        "Above-average institutional buying",
+    ],
+    "key_negatives": [
+        "EU App Store investigation ongoing",
+        "YoY revenue growth modest at 2%",
+        "Elevated near-term price volatility",
+    ],
+    "recommendation": "BUY",
+    "recommendation_rationale": (
+        "Strong fundamentals and positive sentiment outweigh moderate regulatory "
+        "and volatility risks. The earnings beat and Services growth trajectory "
+        "support a BUY with a 12-month horizon."
+    ),
+    "confidence": 0.75,
+    "confidence_label": "HIGH",
+    "action_items": [
+        "Review position sizing relative to current volatility",
+        "Monitor EU regulatory developments over the next 30 days",
+        "Set a stop-loss 8% below current price",
+    ],
+    "scores": {
+        "sentiment_score": 0.72,
+        "risk_score": 0.42,
+        "composite_score": 0.65,
+    },
+}
 
 
-def demo_dashboard():
-    """Demonstrate dashboard features."""
-    print_section("Streamlit Dashboard Demo")
-    
-    print("Interactive web dashboard with multiple features:\n")
-    
-    print("📈 Overview Tab:")
-    print("  • Key metrics and KPIs")
-    print("  • Sentiment trend charts")
-    print("  • Risk distribution visualization")
-    print("  • Recent insights and highlights")
-    
-    print("\n📰 News Monitor Tab:")
-    print("  • Real-time news feed")
-    print("  • Source filtering")
-    print("  • Sentiment-based filtering")
-    print("  • Article summaries with scores")
-    
-    print("\n💭 Sentiment Analysis Tab:")
-    print("  • Overall sentiment gauge")
-    print("  • Sentiment distribution charts")
-    print("  • Key themes and topics")
-    print("  • Historical sentiment trends")
-    
-    print("\n⚠️ Risk Assessment Tab:")
-    print("  • Overall risk score")
-    print("  • Risk factor breakdown")
-    print("  • Severity and likelihood ratings")
-    print("  • Risk management recommendations")
-    
-    print("\n📑 Report Generator Tab:")
-    print("  • Customizable report templates")
-    print("  • Multiple output formats (PDF, DOCX, HTML)")
-    print("  • Chart and visualization inclusion")
-    print("  • Email delivery option")
-    
-    print("\n🚀 To launch the dashboard:")
-    print("   streamlit run streamlit_app/app.py")
-    print("\n   Then open: http://localhost:8501")
+class DemoChain:
+    """Fallback that returns hardcoded realistic results when no LLM is configured."""
+
+    def analyze_stock(self, symbol: str, days_back: int = 7, **kwargs) -> Dict[str, Any]:
+        sym = symbol.upper()
+        return {
+            **_MOCK_SUMMARY,
+            "symbol": sym,
+            "_research": {**_MOCK_RESEARCH, "symbol": sym},
+            "_sentiment": {**_MOCK_SENTIMENT, "symbol": sym},
+            "_risk": {**_MOCK_RISK, "symbol": sym},
+        }
 
 
-def main():
-    """Main demo function."""
-    
-    print("Welcome to the Financial News Analyzer demo!")
-    print("\nThis system uses AI-powered multi-agent architecture to analyze")
-    print("financial news, assess sentiment, and identify risks.\n")
-    
-    print("Built with:")
-    print("  🦜 LangChain - Multi-agent orchestration")
-    print("  🤖 GPT-4 - Language understanding")
-    print("  📊 Plotly - Interactive visualizations")
-    print("  🔥 Streamlit - Web dashboard")
-    print("  ⚡ FastAPI - REST API")
-    
-    print("\n" + "=" * 80)
-    
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline initialization
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_chain(session: Dict[str, Any]) -> Any:
+    """Return the cached chain, initializing it on first call."""
+    if "chain" not in session:
+        if not _LLM_CONFIGURED:
+            session["chain"] = DemoChain()
+        else:
+            print("  Initializing analysis pipeline...", end=" ", flush=True)
+            try:
+                from src.chains.analysis_chain import FinancialAnalysisChain
+                session["chain"] = FinancialAnalysisChain(verbose=False)
+                print("ready.")
+            except Exception as exc:
+                print(f"\n  Pipeline init failed: {exc}")
+                print("  Falling back to demo mode.")
+                session["chain"] = DemoChain()
+    return session["chain"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Display helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _divider(title: str = "") -> None:
+    print()
+    print("─" * 80)
+    if title:
+        print(f"  {title}")
+        print("─" * 80)
+
+
+def _bar(score: float, width: int = 20) -> str:
+    filled = max(0, min(width, int(score * width)))
+    return f"[{'#' * filled}{' ' * (width - filled)}] {score:.0%}"
+
+
+def _display_research(result: Dict[str, Any]) -> None:
+    symbol = result.get("symbol", "?")
+    _divider(f"Research Agent — {symbol}")
+    date_key = "research_date" if "research_date" in result else "analysis_date"
+    date_val = str(result.get(date_key, "N/A"))[:10]
+    print(f"  Date:    {date_val}")
+    print(f"  Period:  {result.get('period_days', 7)} days")
+    sources = result.get("sources_used") or []
+    print(f"  Sources: {', '.join(sources) if sources else 'N/A'}")
+    print()
+    findings = result.get("findings", "No findings available.")
+    for line in textwrap.wrap(str(findings), width=76):
+        print(f"  {line}")
+
+
+def _display_sentiment(result: Dict[str, Any]) -> None:
+    symbol = result.get("symbol", "?")
+    _divider(f"Sentiment Agent — {symbol}")
+    label = result.get("overall_sentiment", "N/A")
+    score = float(result.get("sentiment_score", 0.5))
+    confidence = float(result.get("confidence", 0.0))
+    count = result.get("text_count", "N/A")
+    dedup = int(result.get("dedup_count", 0))
+    print(f"  Sentiment:      {label}")
+    print(f"  Score:          {_bar(score)}")
+    print(f"  Confidence:     {_bar(confidence)}")
+    suffix = f"  ({dedup} duplicates removed)" if dedup else ""
+    print(f"  Texts analyzed: {count}{suffix}")
+    insights = result.get("key_insights", {})
+    if isinstance(insights, dict):
+        pos = insights.get("positive_factors", [])
+        neg = insights.get("negative_factors", [])
+        if pos:
+            print("\n  Positive factors:")
+            for item in pos:
+                print(f"    + {item}")
+        if neg:
+            print("\n  Negative factors:")
+            for item in neg:
+                print(f"    - {item}")
+
+
+def _display_risk(result: Dict[str, Any]) -> None:
+    symbol = result.get("symbol", "?")
+    _divider(f"Risk Agent — {symbol}")
+    level = result.get("risk_level", "N/A")
+    score = float(result.get("overall_risk_score", 0.0))
+    print(f"  Risk level: {level}")
+    print(f"  Risk score: {_bar(score)}")
+    risks = result.get("identified_risks", [])
+    if risks:
+        print()
+        print(f"  {'Category':<14} {'Severity':<10} {'Likelihood':<12} Description")
+        print("  " + "─" * 66)
+        for r in risks:
+            cat = str(r.get("category", "?")).capitalize()
+            sev = str(r.get("severity", "?"))
+            lik = float(r.get("likelihood", 0.0))
+            desc = str(r.get("description", ""))[:42]
+            print(f"  {cat:<14} {sev:<10} {lik:<12.0%} {desc}")
+    alerts = result.get("alerts", [])
+    if alerts:
+        print(f"\n  {len(alerts)} alert(s) generated")
+    recs = result.get("recommendations", [])
+    if recs:
+        print("\n  Recommendations:")
+        for rec in recs:
+            print(f"    * {rec}")
+
+
+def _format_report(chain: Any, result: Dict[str, Any]) -> str:
+    """Format a full analysis result as Markdown using SummaryAgent when available."""
+    if hasattr(chain, "summary_agent"):
+        return chain.summary_agent.generate_report_markdown(result)
+    # DemoChain fallback — render inline (mirrors generate_report_markdown logic)
+    sym = result.get("symbol", "N/A")
+    date = str(result.get("analysis_date", datetime.now().isoformat()))[:10]
+    scores = result.get("scores", {})
+    positives = "\n".join(f"- {p}" for p in result.get("key_positives", ["No data"]))
+    negatives = "\n".join(f"- {n}" for n in result.get("key_negatives", ["No data"]))
+    actions = "\n".join(
+        f"{i+1}. {a}" for i, a in enumerate(result.get("action_items", ["Monitor closely"]))
+    )
+    return (
+        f"# Investment Research Report: {sym}\n\n"
+        f"**Date:** {date}  \n"
+        f"**Period:** {result.get('period_days', 7)} days  \n"
+        f"**Confidence:** {result.get('confidence_label', 'N/A')}"
+        f" ({result.get('confidence', 0):.0%})\n\n"
+        f"---\n\n"
+        f"## Executive Summary\n\n{result.get('executive_summary', 'Not available.')}\n\n"
+        f"---\n\n"
+        f"## Key Positives\n\n{positives}\n\n"
+        f"## Key Negatives / Risks\n\n{negatives}\n\n"
+        f"---\n\n"
+        f"## Scores\n\n"
+        f"| Metric | Score |\n|---|---|\n"
+        f"| Sentiment Score | {scores.get('sentiment_score', 0):.2f} |\n"
+        f"| Risk Score | {scores.get('risk_score', 0):.2f} |\n"
+        f"| Composite Score | {scores.get('composite_score', 0):.2f} |\n\n"
+        f"---\n\n"
+        f"## Investment Recommendation\n\n"
+        f"**{result.get('recommendation', 'N/A')}**\n\n"
+        f"{result.get('recommendation_rationale', '')}\n\n"
+        f"---\n\n"
+        f"## Action Items\n\n{actions}\n\n"
+        f"---\n\n"
+        f"*Generated by Financial News Analyzer — "
+        f"{'Live Analysis' if _LLM_CONFIGURED else 'Demo Mode'}*\n"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Menu handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_research(symbol: str, session: Dict[str, Any]) -> None:
+    chain = _get_chain(session)
+    if isinstance(chain, DemoChain):
+        result = {**_MOCK_RESEARCH, "symbol": symbol.upper()}
+        session["research"] = result
+        _display_research(result)
+        print("\n  (Demo mode — representative mock data)")
+        return
+
+    print(f"  Running ResearchAgent for {symbol}...")
+    try:
+        result = chain.research_agent.execute({"symbol": symbol, "days_back": 7})
+        session["research"] = result
+        _display_research(result)
+    except Exception as exc:
+        print(f"  ResearchAgent failed: {exc}")
+
+
+def run_sentiment(symbol: str, session: Dict[str, Any]) -> None:
+    chain = _get_chain(session)
+    if isinstance(chain, DemoChain):
+        result = {**_MOCK_SENTIMENT, "symbol": symbol.upper()}
+        session["sentiment"] = result
+        _display_sentiment(result)
+        print("\n  (Demo mode — representative mock data)")
+        return
+
+    research = session.get("research", {})
+    text = research.get("findings") or _SAMPLE_TEXT
+    if not research:
+        print("  No prior research in session — analyzing sample text.")
+    print(f"  Running SentimentAgent for {symbol}...")
+    try:
+        result = chain.sentiment_agent.execute({
+            "symbol": symbol,
+            "text": text,
+            "context": f"Financial analysis for {symbol}",
+        })
+        session["sentiment"] = result
+        _display_sentiment(result)
+    except Exception as exc:
+        print(f"  SentimentAgent failed: {exc}")
+
+
+def run_risk(symbol: str, session: Dict[str, Any]) -> None:
+    chain = _get_chain(session)
+    if isinstance(chain, DemoChain):
+        result = {**_MOCK_RISK, "symbol": symbol.upper()}
+        session["risk"] = result
+        _display_risk(result)
+        print("\n  (Demo mode — representative mock data)")
+        return
+
+    news_data = session.get("research", {})
+    sentiment = session.get("sentiment", {})
+    if not news_data:
+        print("  No prior research in session — risk analysis will use limited context.")
+    print(f"  Running RiskAgent for {symbol}...")
+    try:
+        result = chain.risk_agent.execute({
+            "symbol": symbol,
+            "news_data": news_data,
+            "market_data": {},
+            "sentiment": sentiment,
+        })
+        session["risk"] = result
+        _display_risk(result)
+    except Exception as exc:
+        print(f"  RiskAgent failed: {exc}")
+
+
+def run_full_analysis(symbol: str, days_back: int, session: Dict[str, Any]) -> None:
+    chain = _get_chain(session)
+    _divider(f"Full Analysis — {symbol} (last {days_back} days)")
+
+    if isinstance(chain, DemoChain):
+        print("  (Demo mode — representative mock data)\n")
+        result = chain.analyze_stock(symbol, days_back)
+    else:
+        print("  Running pipeline: Research → Sentiment + Risk (parallel) → Summary")
+        try:
+            result = chain.analyze_stock(symbol, days_back)
+        except Exception as exc:
+            print(f"  Pipeline failed: {exc}")
+            return
+
+    session["research"] = result.get("_research", {})
+    session["sentiment"] = result.get("_sentiment", {})
+    session["risk"] = result.get("_risk", {})
+
+    elapsed = result.get("_elapsed_seconds")
+    if elapsed:
+        print(f"  Completed in {elapsed}s\n")
+
+    print(_format_report(chain, result))
+
+
+def show_api() -> None:
+    _divider("REST API Endpoints")
+    print("  Analysis:")
+    print("    POST /api/analyze              — Full stock analysis")
+    print("    GET  /api/stocks/{symbol}/news — Recent news for a symbol")
+    print("    POST /api/sentiment/analyze    — Sentiment analysis")
+    print("    POST /api/risks/detect         — Risk assessment")
+    print()
+    print("  Search:")
+    print("    POST /api/search/semantic      — Semantic search")
+    print("    GET  /api/symbols/trending     — Trending symbols")
+    print()
+    print("  Reports:")
+    print("    POST /api/reports/generate     — Generate markdown report")
+    print()
+    print("  System:")
+    print("    GET  /health                   — Health check")
+    print("    GET  /api/stats                — System statistics")
+    print()
+    print("  Example:")
+    print()
+    print("    import requests")
+    print('    r = requests.post("http://localhost:8000/api/analyze",')
+    print('                      json={"symbol": "AAPL", "days_back": 7,')
+    print('                            "include_sentiment": True, "include_risk": True})')
+    print("    print(r.json()['recommendation'])")
+    print()
+    print("  Start the server:")
+    print("    .venv/bin/uvicorn src.api.main:app --reload --port 8000")
+    print("    Docs at: http://localhost:8000/docs")
+
+
+def show_dashboard() -> None:
+    _divider("Streamlit Dashboard")
+    print("  Pages:")
+    print("    Overview     — Key metrics, sentiment trend, risk distribution")
+    print("    News Monitor — Live news feed with sentiment filtering")
+    print("    Sentiment    — Gauge, distribution charts, historical trends")
+    print("    Risk         — Risk score breakdown, severity / likelihood table")
+    print("    Reports      — Full report generation (Markdown / PDF)")
+    print()
+    print("  Launch:")
+    print("    .venv/bin/streamlit run streamlit_app/Main.py")
+    print("    Then open: http://localhost:8501")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Financial News Analyzer — Demo")
+    parser.add_argument(
+        "--symbol", default="AAPL", metavar="TICKER",
+        help="Stock symbol to analyze (default: AAPL)",
+    )
+    args = parser.parse_args()
+    symbol = args.symbol.upper()
+
+    print("=" * 80)
+    print("  Financial News Analyzer — Interactive Demo")
+    print("=" * 80)
+    print()
+    print("  Stack:  LangChain multi-agent pipeline, FastAPI, Streamlit")
+    print("  Agents: Research → Sentiment → Risk → Summary")
+    print()
+    if _LLM_CONFIGURED:
+        print(f"  LLM: {_LLM_PROVIDER}  (live analysis enabled)")
+    else:
+        print("  No LLM key detected (OPENAI_API_KEY / ANTHROPIC_API_KEY / OLLAMA_BASE_URL).")
+        print("  Running in demo mode — outputs are representative mock data.")
+        print("  Add an LLM key to .env to enable live analysis.")
+    print()
+    print(f"  Symbol: {symbol}  (override with --symbol TSLA)")
+
+    # Session state: chain and agent results shared across all menu options
+    session: Dict[str, Any] = {}
+
     while True:
-        print("\n\nDemo Options:")
-        print("  1. Research Agent Demo")
-        print("  2. Sentiment Agent Demo")
-        print("  3. Risk Agent Demo")
-        print("  4. Complete Multi-Agent Analysis")
-        print("  5. API Usage Demo")
-        print("  6. Dashboard Features")
-        print("  7. Exit")
-        
-        choice = input("\nSelect an option (1-7): ").strip()
-        
+        print()
+        print("─" * 80)
+        print(f"  Symbol: {symbol}")
+        print("─" * 80)
+        print("    1. Research Agent       — fetch news & market data")
+        print("    2. Sentiment Agent      — score market sentiment")
+        print("    3. Risk Agent           — identify risk factors")
+        print("    4. Full Analysis        — run complete pipeline, display report")
+        print("    5. API Endpoints        — REST API reference")
+        print("    6. Dashboard            — Streamlit launch instructions")
+        print("    7. Change symbol")
+        print("    8. Exit")
+
+        choice = input("\n  Select (1-8): ").strip()
+
         if choice == "1":
-            demo_research_agent()
+            run_research(symbol, session)
         elif choice == "2":
-            demo_sentiment_agent()
+            run_sentiment(symbol, session)
         elif choice == "3":
-            demo_risk_agent()
+            run_risk(symbol, session)
         elif choice == "4":
-            demo_complete_analysis()
+            days_str = input("  Days back (default 7): ").strip()
+            days_back = int(days_str) if days_str.isdigit() else 7
+            run_full_analysis(symbol, days_back, session)
         elif choice == "5":
-            demo_api_usage()
+            show_api()
         elif choice == "6":
-            demo_dashboard()
+            show_dashboard()
         elif choice == "7":
-            print("\n" + "=" * 80)
-            print("Thank you for exploring Financial News Analyzer!")
+            new_sym = input("  Enter new symbol: ").strip().upper()
+            if new_sym:
+                old_chain = session.get("chain")
+                symbol = new_sym
+                session = {}
+                if old_chain is not None:
+                    session["chain"] = old_chain
+                print(f"  Symbol changed to {symbol}. Session state cleared.")
+        elif choice == "8":
+            print()
             print("=" * 80)
-            print("\n📚 Next Steps:")
-            print("  • Read the documentation in docs/")
-            print("  • Try the Streamlit dashboard")
-            print("  • Explore the API at /docs")
-            print("  • Check out example notebooks")
-            print("\n🚀 Get started:")
-            print("   streamlit run streamlit_app/app.py")
-            print("\n💼 Portfolio ready!")
-            print("   This project demonstrates:")
-            print("     ✅ LangChain multi-agent systems")
-            print("     ✅ Real-world API integration")
-            print("     ✅ Production-ready architecture")
-            print("     ✅ Full-stack development")
-            print("     ✅ ML/AI implementation")
-            print("\nGood luck with your job search! 🎯\n")
+            print("  Thank you for exploring Financial News Analyzer!")
+            print("  Next: .venv/bin/streamlit run streamlit_app/Main.py")
+            print("=" * 80)
+            print()
             break
         else:
-            print("Invalid option. Please select 1-7.")
+            print("  Invalid choice — enter a number from 1 to 8.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nDemo interrupted. Goodbye! 👋")
-    except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
-        print("Please check your setup and try again.")
+        print("\n\nInterrupted. Goodbye!")
+    except Exception as exc:
+        print(f"\nError: {exc}")
+        print("Check your setup (.env, dependencies) and try again.")
