@@ -200,6 +200,7 @@ class FinancialAnalysisChain:
         context_from_vector_store: bool = True,
         fail_fast: bool = False,
         record_for_backtest: bool = False,
+        enable_alerts: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the complete analysis pipeline for a stock symbol (synchronous wrapper).
@@ -220,6 +221,9 @@ class FinancialAnalysisChain:
             record_for_backtest: When True, persist the recommendation to the
                 SQLite backtesting database after a successful pipeline run.
                 Defaults to False to avoid unintended writes.
+            enable_alerts: When True, dispatch HIGH/CRITICAL risk alerts via
+                ``AlertDispatcher`` after the RiskAgent stage.
+                Defaults to False to avoid unintended external calls.
 
         Returns:
             Dict with keys matching SummaryAgent.execute() output plus
@@ -238,6 +242,7 @@ class FinancialAnalysisChain:
                 context_from_vector_store=context_from_vector_store,
                 fail_fast=fail_fast,
                 record_for_backtest=record_for_backtest,
+                enable_alerts=enable_alerts,
             )
         )
 
@@ -251,6 +256,7 @@ class FinancialAnalysisChain:
         context_from_vector_store: bool = True,
         fail_fast: bool = False,
         record_for_backtest: bool = False,
+        enable_alerts: bool = False,
     ) -> Dict[str, Any]:
         """
         Async version of analyze_stock().
@@ -359,6 +365,17 @@ class FinancialAnalysisChain:
                 risk_result = raw_risk
         else:
             logger.info("[3/4] Risk Agent — skipped")
+
+        # ── Alert dispatch (opt-in) ───────────────────────────────────────
+        if enable_alerts and risk_result.get("alerts"):
+            try:
+                from src.utils.alerting import AlertDispatcher
+                AlertDispatcher().dispatch(
+                    alerts=risk_result["alerts"],
+                    symbol=symbol,
+                )
+            except Exception as exc:
+                logger.warning(f"Alert dispatch failed for {symbol}: {exc}")
 
         # ── Stage 4: Summary ──────────────────────────────────────────────
         logger.info(f"[4/4] Summary Agent — {symbol}")

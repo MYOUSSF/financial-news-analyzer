@@ -982,6 +982,7 @@ class TestFinancialAnalysisChainAsync:
             context_from_vector_store=True,
             fail_fast=False,
             record_for_backtest=False,
+            enable_alerts=False,
         )
         assert result["recommendation"] == "HOLD"
 
